@@ -36,6 +36,9 @@ export const DotLinkEvidenceSchema = z.object({
   temporalDistanceHours: z.number(),
   quotedTextOverlap: z.array(z.string()).optional(),
   artifactOverlap: z.array(z.string()).optional(),
+  /** Semantic/topical overlap score (0..1) recorded at scoring time. Optional:
+   * legacy links predate the field. */
+  topicalOverlap: z.number().min(0).max(1).optional(),
   rationale: z.string(),
 });
 export type DotLinkEvidence = z.infer<typeof DotLinkEvidenceSchema>;
@@ -66,4 +69,22 @@ export function evidenceIsCorroborated(evidence: DotLinkEvidence): boolean {
   const artifacts = (evidence.artifactOverlap?.length ?? 0) > 0;
   const quoted = (evidence.quotedTextOverlap?.length ?? 0) > 0;
   return people || artifacts || quoted;
+}
+
+/** Minimum recorded topical overlap that counts as "actually about something shared". */
+export const TOPICAL_ANCHOR_MIN = 0.2;
+
+/**
+ * Does the evidence say WHAT the two signals are about together — a shared
+ * entity, artifact, quote, or real topical overlap? Corroboration alone (a
+ * shared person + temporal proximity) is how every coworker pair co-occurs;
+ * without a topical anchor there is nothing for a human to review. Evidence
+ * predating `topicalOverlap` is treated as anchored (back-compat: legacy links
+ * were produced before the field existed and must not be retro-quarantined).
+ */
+export function evidenceHasTopicalAnchor(evidence: DotLinkEvidence): boolean {
+  if (evidence.sharedEntities.length > 0) return true;
+  if ((evidence.artifactOverlap?.length ?? 0) > 0) return true;
+  if ((evidence.quotedTextOverlap?.length ?? 0) > 0) return true;
+  return evidence.topicalOverlap === undefined || evidence.topicalOverlap >= TOPICAL_ANCHOR_MIN;
 }

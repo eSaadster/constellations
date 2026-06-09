@@ -5,6 +5,8 @@ import { email_to_meeting } from "./cases/email_to_meeting.js";
 import { doc_to_thread } from "./cases/doc_to_thread.js";
 import { conflict_detection } from "./cases/conflict_detection.js";
 import { false_friend_topic } from "./cases/false_friend_topic.js";
+import { recurring_series_noise } from "./cases/recurring_series_noise.js";
+import { owner_ubiquity } from "./cases/owner_ubiquity.js";
 
 export * from "./harness.js";
 
@@ -14,6 +16,8 @@ export const EVAL_CASES: Record<string, EvalCase> = {
   doc_to_thread,
   conflict_detection,
   false_friend_topic,
+  recurring_series_noise,
+  owner_ubiquity,
 };
 
 export function listEvalCaseNames(): string[] {

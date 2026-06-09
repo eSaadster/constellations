@@ -5,9 +5,20 @@ import { createLogger, setLogger } from "../../observability/logger.js";
 setLogger(createLogger({ level: "silent" }));
 
 describe("evaluation harness", () => {
-  it("has the five required fixture cases", () => {
+  // Updated for the link-quality overhaul: recurring_series_noise (sibling
+  // instances of one recurring meeting must never link) and owner_ubiquity
+  // (overlap on a graph-ubiquitous owner is not evidence) join the original five.
+  it("has the seven required fixture cases", () => {
     expect(listEvalCaseNames().sort()).toEqual(
-      ["conflict_detection", "doc_to_thread", "email_to_meeting", "false_friend_topic", "slack_to_calendar"].sort(),
+      [
+        "conflict_detection",
+        "doc_to_thread",
+        "email_to_meeting",
+        "false_friend_topic",
+        "owner_ubiquity",
+        "recurring_series_noise",
+        "slack_to_calendar",
+      ].sort(),
     );
   });
 

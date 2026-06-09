@@ -15,6 +15,14 @@ export interface LinkLabInput {
   candidateSignals: Signal[];
   allowedRelations: DotLinkRelation[];
   thresholdPolicy: ConfidenceThresholds;
+  /**
+   * Normalized person keys too ubiquitous to be evidence (the graph-owner
+   * problem: 31% of live links had the owner as their ONLY shared person).
+   * Computed PARENT-side via `computeUbiquitousPeople` — the sealed lab cannot
+   * read the graph. REQUIRED so every spawner states intent explicitly; `[]`
+   * means "treat everyone as discriminative" (correct for tiny fixture worlds).
+   */
+  ubiquitousPeople: string[];
 }
 
 export interface LinkLabExclusion {

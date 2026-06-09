@@ -2,6 +2,7 @@ import { z } from "zod";
 import { defineTool } from "../defineTool.js";
 import type { ToolDefinition } from "../../agent/toolRegistry.js";
 import { DotLinkSchema, DotLinkRelationSchema } from "../../artifacts/DotLink.js";
+import { computeUbiquitousPeople } from "../../graph/discriminative.js";
 import { SignalParseError } from "../../resilience/errors.js";
 
 /**
@@ -51,6 +52,9 @@ export const subagentTools: ToolDefinition<any, any>[] = [
         candidateSignals,
         allowedRelations: allowedRelations ?? [...ALL_RELATIONS],
         thresholdPolicy: ctx.thresholds,
+        // Graph-wide stats are computed HERE (parent side, live store) and
+        // passed in: the lab is sealed and can never see the graph itself.
+        ubiquitousPeople: computeUbiquitousPeople(ctx.store.listSignals()),
       });
     },
   }),

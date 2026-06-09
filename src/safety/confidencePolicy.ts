@@ -1,5 +1,5 @@
 import type { DotLinkEvidence, DotLinkStatus } from "../artifacts/DotLink.js";
-import { evidenceIsCorroborated } from "../artifacts/DotLink.js";
+import { evidenceHasTopicalAnchor, evidenceIsCorroborated } from "../artifacts/DotLink.js";
 
 /**
  * Confidence policy — the safety gate that turns a score into a status.
@@ -18,7 +18,11 @@ import { evidenceIsCorroborated } from "../artifacts/DotLink.js";
  * Bands:
  *   confidence >= autoConfirmAbove  AND corroborated  -> confirmed
  *   confidence >= autoConfirmAbove  AND NOT corroborated -> proposed (vibe guard)
- *   quarantineBelow <= confidence < autoConfirmAbove -> proposed
+ *   quarantineBelow <= confidence < autoConfirmAbove AND corroborated AND
+ *     topically anchored -> proposed; otherwise quarantined. The review queue
+ *     is a promise of human attention: a pair whose only evidence is "a shared
+ *     person, close in time" is how every coworker pair co-occurs — measured
+ *     live, this rule is what shrinks a 1,457-item fake queue to tens.
  *   confidence < quarantineBelow -> quarantined
  *
  * The policy NEVER returns "rejected" automatically; rejection is a human/
@@ -73,10 +77,22 @@ export function decideLinkStatus(
     };
   }
 
+  if (corroborated && evidenceHasTopicalAnchor(evidence)) {
+    return {
+      status: "proposed",
+      corroborated,
+      reason: `confidence ${confidence.toFixed(2)} in review band [${thresholds.quarantineBelow}, ${thresholds.autoConfirmAbove})`,
+    };
+  }
+
   return {
-    status: "proposed",
+    status: "quarantined",
     corroborated,
-    reason: `confidence ${confidence.toFixed(2)} in review band [${thresholds.quarantineBelow}, ${thresholds.autoConfirmAbove})`,
+    reason: `confidence ${confidence.toFixed(2)} in review band but ${
+      corroborated
+        ? "lacks a topical anchor — a shared person plus temporal proximity is how every coworker pair co-occurs, not reviewable evidence"
+        : "evidence is uncorroborated"
+    }`,
   };
 }
 

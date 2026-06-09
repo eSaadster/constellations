@@ -6,6 +6,7 @@ import type { DotLink } from "../../artifacts/DotLink.js";
 import { ConstellationSchema, type Constellation } from "../../artifacts/Constellation.js";
 import { ContextCardSchema, type ContextCardConnection } from "../../artifacts/ContextCard.js";
 import { classifyClaim } from "../../graph/provenance.js";
+import { seriesKeyOf } from "../../graph/series.js";
 
 /**
  * constellation.* — cluster assembly + the user-facing Context Card.
@@ -17,24 +18,54 @@ import { classifyClaim } from "../../graph/provenance.js";
 
 function gatherCluster(
   anchorSignalId: string,
-  store: { neighbors: (id: string) => { link: DotLink; neighbor: Signal }[] },
+  store: {
+    neighbors: (id: string) => { link: DotLink; neighbor: Signal }[];
+    getSignal: (id: string) => Signal | undefined;
+    listSignals: () => Signal[];
+  },
 ): { signalIds: Set<string>; links: DotLink[] } {
-  const signalIds = new Set<string>([anchorSignalId]);
+  // Instances of one recurring series are ONE logical node: when any instance
+  // joins the cluster, its siblings join (and are traversed) too — an email
+  // linked to instance #17 belongs to the same workstream as instance #3, and
+  // get_timeline keeps showing every occurrence.
+  const siblingsBySeries = new Map<string, string[]>();
+  for (const s of store.listSignals()) {
+    const key = seriesKeyOf(s);
+    if (key === undefined) continue;
+    siblingsBySeries.set(key, [...(siblingsBySeries.get(key) ?? []), s.id]);
+  }
+
+  const signalIds = new Set<string>();
   const links: DotLink[] = [];
   const seenLinks = new Set<string>();
-  const queue = [anchorSignalId];
+  const queue: string[] = [];
+  const add = (id: string): void => {
+    if (signalIds.has(id)) return;
+    signalIds.add(id);
+    queue.push(id);
+    const signal = store.getSignal(id);
+    const key = signal ? seriesKeyOf(signal) : undefined;
+    if (key === undefined) return;
+    for (const sibling of siblingsBySeries.get(key) ?? []) {
+      if (!signalIds.has(sibling)) {
+        signalIds.add(sibling);
+        queue.push(sibling);
+      }
+    }
+  };
+  add(anchorSignalId);
   while (queue.length) {
     const id = queue.shift()!;
     for (const { link, neighbor } of store.neighbors(id)) {
-      if (link.status === "rejected") continue;
+      // Only confirmed/proposed links are structural (matching this tool's
+      // stated contract). Quarantined links are sub-evidence-threshold by
+      // definition; traversing them glued 210/218 live signals into one blob.
+      if (link.status === "rejected" || link.status === "quarantined") continue;
       if (!seenLinks.has(link.id)) {
         seenLinks.add(link.id);
         links.push(link);
       }
-      if (!signalIds.has(neighbor.id)) {
-        signalIds.add(neighbor.id);
-        queue.push(neighbor.id);
-      }
+      add(neighbor.id);
     }
   }
   return { signalIds, links };

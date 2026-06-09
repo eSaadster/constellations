@@ -14,6 +14,8 @@ import {
   scoreArtifactOverlap,
   classifyRelation,
 } from "../../graph/scoring.js";
+import { discriminativeCeiling, normalizePersonKey } from "../../graph/discriminative.js";
+import { sameSeries } from "../../graph/series.js";
 
 /**
  * link.* — candidate discovery, the five forensic scorers (used by LinkLab in
@@ -36,14 +38,10 @@ const ScoresSchema = z.object({
  * spawned). */
 const BLOCKING_WINDOW_MS = 48 * 3_600_000;
 
-/** A person/fact is "discriminative" only if it appears in at most this many
- * signals — scale-aware so the graph owner (who touches nearly everything)
- * stops being false evidence of relatedness, while tiny fixture graphs are
- * unaffected. */
-function discriminativeCeiling(graphSize: number): number {
-  return Math.max(5, Math.ceil(graphSize * 0.3));
-}
-
+// Blocking features deliberately span ALL extracted facts (people + entities +
+// projects + artifacts) for recall; the SCORING-side ubiquity filter
+// (graph/discriminative.ts) is people-only because evidence.sharedPeople and
+// the people dimension are built from actorIds ∪ extracted.people.
 function blockingFeatures(s: {
   actorIds: string[];
   extracted: { people: string[]; entities: string[]; projects: string[]; artifacts: string[] };
@@ -102,6 +100,9 @@ export const linkTools: ToolDefinition<any, any>[] = [
 
       const kept = all.filter((s) => {
         if (s.id === anchorSignalId) return false;
+        // Same recurring series: scheduling structure, never an insight — and
+        // daily siblings would otherwise always pass the 48h window below.
+        if (sameSeries(anchor, s)) return false;
         const t = Date.parse(s.timestamp);
         if (
           Number.isFinite(anchorT) &&
@@ -135,16 +136,21 @@ export const linkTools: ToolDefinition<any, any>[] = [
 
   defineTool({
     name: "link.score_people_overlap",
-    description: "Score overlap of people/actors between two signals (0..1). Corroborating evidence.",
-    inputSchema: Pair,
+    description:
+      "Score overlap of people/actors between two signals (0..1). Corroborating evidence. `ignorePeople` lists graph-ubiquitous people (e.g. the owner) that must not count as overlap.",
+    inputSchema: Pair.extend({ ignorePeople: z.array(z.string()).default([]) }),
     outputSchema: z.object({ score: z.number() }),
     consumes: ["Signal"],
     produces: [],
     sideEffects: "none",
     riskLevel: "low",
     requiredConsentScopes: [],
-    handler: async ({ anchorSignal, candidateSignal }) => ({
-      score: scorePeopleOverlap(anchorSignal, candidateSignal),
+    handler: async ({ anchorSignal, candidateSignal, ignorePeople }) => ({
+      score: scorePeopleOverlap(
+        anchorSignal,
+        candidateSignal,
+        new Set(ignorePeople.map(normalizePersonKey)),
+      ),
     }),
   }),
 

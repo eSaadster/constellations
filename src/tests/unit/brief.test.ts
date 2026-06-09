@@ -246,6 +246,33 @@ describe("computeBriefAnalytics", () => {
     expect(analytics.hygiene.emptyExtractionRatio).toBeCloseTo(7 / 8, 3);
   });
 
+  it("reports orphans series-granularly: one row per fully-unlinked series, none for linked series", () => {
+    const store = new MemoryGraphStore();
+    const instance = (id: string, series: string, day: string) => ({
+      ...makeSignal({
+        id,
+        source: "calendar" as const,
+        timestamp: `2026-06-${day}T10:00:00.000Z`,
+        excerpt: "huddle",
+      }),
+      externalId: `${series}_202606${day}T100000Z`,
+    });
+    // Series "lonely": 3 instances, zero links → exactly ONE orphan row (latest instance).
+    store.addSignal(instance("o1", "lonely", "01"));
+    store.addSignal(instance("o2", "lonely", "02"));
+    store.addSignal(instance("o3", "lonely", "03"));
+    // Series "busy": instance b2 is actively linked → NO instance is an orphan.
+    store.addSignal(instance("b1", "busy", "01"));
+    store.addSignal(instance("b2", "busy", "02"));
+    store.addSignal(
+      makeSignal({ id: "mail", source: "email", timestamp: "2026-06-02T08:00:00.000Z", excerpt: "agenda" }),
+    );
+    store.addLink(link("lx", "mail", "b2", "confirmed", 0.8, { sharedPeople: ["Maya"] }));
+
+    const a = computeBriefAnalytics(store, { nowIso: NOW, tzOffsetHours: 5 });
+    expect(a.orphans.map((o) => o.id)).toEqual(["o3"]);
+  });
+
   it("handles an empty store without NaN or crashes", () => {
     const empty = computeBriefAnalytics(new MemoryGraphStore(), { nowIso: NOW });
     expect(empty.counts).toEqual({ signals: 0, links: 0, constellations: 0 });

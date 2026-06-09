@@ -10,6 +10,7 @@ import {
 } from "./planner.js";
 import { createToolRegistry } from "../tools/index.js";
 import { MemoryGraphStore } from "../graph/memoryStore.js";
+import { planLinkDedupe } from "../graph/dedupe.js";
 import type { GraphStore } from "../graph/store.js";
 import { Tracer, type Trace } from "../observability/traces.js";
 import { getLogger, type ConstellationLogger } from "../observability/logger.js";
@@ -366,25 +367,13 @@ export class ConstellationRuntime {
   }
 
   /**
-   * Remove duplicate links, keeping the highest-confidence link per unordered
-   * (sourceSignalId, targetSignalId) pair + relation. Returns the count removed.
+   * Remove duplicate links at series granularity: same-series sibling links
+   * are purged outright, and the highest-confidence link survives per
+   * unordered logical-node pair + relation (see graph/dedupe.ts). Returns the
+   * count removed.
    */
   private dedupeStoredLinks(): number {
-    const best = new Map<string, DotLink>();
-    const losers: string[] = [];
-    for (const link of this.store.listLinks()) {
-      const pair = [link.sourceSignalId, link.targetSignalId].sort().join("::");
-      const key = `${pair}|${link.relation}`;
-      const incumbent = best.get(key);
-      if (!incumbent) {
-        best.set(key, link);
-      } else if (link.confidence > incumbent.confidence) {
-        best.set(key, link);
-        losers.push(incumbent.id);
-      } else {
-        losers.push(link.id);
-      }
-    }
+    const losers = planLinkDedupe(this.store.listLinks(), this.store.listSignals());
     for (const id of losers) this.store.removeLink(id);
     return losers.length;
   }

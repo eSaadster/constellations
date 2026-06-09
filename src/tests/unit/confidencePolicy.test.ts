@@ -51,4 +51,28 @@ describe("confidence policy", () => {
     expect(DEFAULT_THRESHOLDS.autoConfirmAbove).toBe(0.6);
     expect(DEFAULT_THRESHOLDS.quarantineBelow).toBe(0.35);
   });
+
+  it("quarantines a mid-band link whose only evidence is a shared person near in time (no topical anchor)", () => {
+    const peopleOnly: DotLinkEvidence = {
+      sharedEntities: [],
+      sharedPeople: ["alice"],
+      temporalDistanceHours: 2,
+      topicalOverlap: 0.05,
+      rationale: "shared person, close in time, about nothing shared",
+    };
+    const d = decideLinkStatus(0.5, peopleOnly);
+    expect(d.status).toBe("quarantined");
+    expect(d.corroborated).toBe(true);
+    expect(d.reason).toMatch(/topical anchor/);
+  });
+
+  it("treats legacy evidence without topicalOverlap as anchored (back-compat: not retro-quarantined)", () => {
+    const legacy: DotLinkEvidence = {
+      sharedEntities: [],
+      sharedPeople: ["alice"],
+      temporalDistanceHours: 2,
+      rationale: "pre-topicalOverlap link",
+    };
+    expect(decideLinkStatus(0.5, legacy).status).toBe("proposed");
+  });
 });

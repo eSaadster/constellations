@@ -4,6 +4,7 @@ import type { GraphStore } from "../graph/store.js";
 import type { Signal } from "../artifacts/Signal.js";
 import type { DotLink } from "../artifacts/DotLink.js";
 import { evidenceIsCorroborated } from "../artifacts/DotLink.js";
+import { RECURRENCE_SUFFIX_RE, seriesKeyOf } from "../graph/series.js";
 import { runModelDriven } from "./piModelDriver.js";
 import { systemClock } from "../util/ids.js";
 
@@ -53,9 +54,6 @@ function histogram(values: string[]): Record<string, number> {
  * must not be read as "01 AM").
  */
 const LATE_HOUR_RE = /(?<![\d:.])\b(12|0?[1-5])(?::[0-5]\d)?\s*a\.?m\.?\b/gi;
-
-/** Strip a calendar recurrence suffix (e.g. `_20260512T150000Z`) to a series stem. */
-const RECURRENCE_SUFFIX_RE = /_\d{8}(?:T\d{4,6}Z?)?$/i;
 
 /** Raw, unresolved Slack-style actor ids — an identity-resolution gap. */
 const RAW_ACTOR_ID_RE = /^U[A-Z0-9]{8,}$/;
@@ -178,8 +176,29 @@ export function computeBriefAnalytics(store: GraphStore, opts: BriefAnalyticsOpt
     degree.set(l.targetSignalId, (degree.get(l.targetSignalId) ?? 0) + 1);
   }
 
+  // Series-granular orphan reporting: instances of one recurring series stand
+  // or fall together. Series siblings are no longer linked to each other (that
+  // was the sibling-link disease), so without this rule every instance of an
+  // unlinked series would emit its own orphan row — a series with ANY actively
+  // linked instance is not orphaned, and a fully-unlinked series reports ONE
+  // row (its latest instance).
+  const seriesActiveDegree = new Map<string, number>();
+  const seriesLatest = new Map<string, Signal>();
+  for (const s of signals) {
+    const key = seriesKeyOf(s);
+    if (key === undefined) continue;
+    seriesActiveDegree.set(key, (seriesActiveDegree.get(key) ?? 0) + (degree.get(s.id) ?? 0));
+    const latest = seriesLatest.get(key);
+    if (!latest || (epochOf(s.timestamp) ?? 0) > (epochOf(latest.timestamp) ?? 0)) {
+      seriesLatest.set(key, s);
+    }
+  }
   const orphans = signals
-    .filter((s) => (degree.get(s.id) ?? 0) === 0)
+    .filter((s) => {
+      const key = seriesKeyOf(s);
+      if (key === undefined) return (degree.get(s.id) ?? 0) === 0;
+      return (seriesActiveDegree.get(key) ?? 0) === 0 && seriesLatest.get(key)?.id === s.id;
+    })
     .map((s) => ({ id: s.id, source: s.source, title: s.title, timestamp: s.timestamp }))
     .sort((a, b) => a.id.localeCompare(b.id));
 

@@ -1,5 +1,6 @@
 import type { Signal } from "../artifacts/Signal.js";
 import type { DotLinkEvidence, DotLinkRelation } from "../artifacts/DotLink.js";
+import { isPersonKey, normalizePersonKey } from "./discriminative.js";
 
 /**
  * Forensic scoring for DotLink proposals (mock implementation).
@@ -91,10 +92,35 @@ export function scoreSemanticOverlap(a: Signal, b: Signal): number {
   return Math.min(1, 0.6 * Math.min(1, tokenJaccard * 2.5) + 0.6 * structured);
 }
 
-/** People overlap over extracted people + actor ids. */
-export function scorePeopleOverlap(a: Signal, b: Signal): number {
-  const ap = normalizeList([...a.extracted.people, ...a.actorIds]);
-  const bp = normalizeList([...b.extracted.people, ...b.actorIds]);
+const EMPTY_IGNORE: ReadonlySet<string> = new Set();
+
+/**
+ * Normalized person keys for one side of a pair. Two filters keep non-evidence
+ * out of the people dimension AND out of evidence.sharedPeople:
+ *   - `isPersonKey` drops automation senders / bare domains unconditionally
+ *     (a receipt bot on both emails proves nothing);
+ *   - `ignorePeople` drops graph-ubiquitous people (the owner) — computed
+ *     parent-side from document frequency, because this module must stay
+ *     store-free (the sealed LinkLab imports it). Absent ⇒ today's behavior:
+ *     everyone is discriminative (tiny fixture graphs are unaffected).
+ */
+function personKeys(items: string[], ignorePeople: ReadonlySet<string>): Set<string> {
+  const out = new Set<string>();
+  for (const raw of items) {
+    const key = normalizePersonKey(raw);
+    if (key && isPersonKey(key) && !ignorePeople.has(key)) out.add(key);
+  }
+  return out;
+}
+
+/** People overlap over extracted people + actor ids (bots/ubiquitous people excluded). */
+export function scorePeopleOverlap(
+  a: Signal,
+  b: Signal,
+  ignorePeople: ReadonlySet<string> = EMPTY_IGNORE,
+): number {
+  const ap = personKeys([...a.extracted.people, ...a.actorIds], ignorePeople);
+  const bp = personKeys([...b.extracted.people, ...b.actorIds], ignorePeople);
   return jaccard(ap, bp);
 }
 
@@ -149,8 +175,6 @@ const CONFLICT_MARKERS = [
   "not going",
 ];
 
-const MEETING_MARKERS = ["meeting", "invite", "calendar", "sync", "review", "standup", "call"];
-
 /**
  * Classify the relation between an anchor (source) and a candidate (target).
  * Deterministic heuristics over evidence dimensions + light lexical cues.
@@ -169,11 +193,12 @@ export function classifyRelation(
     return "conflicts_with";
   }
 
-  // Calendar reference: one side is a calendar event and they share context.
-  if (
-    (candidate.source === "calendar" || anchor.source === "calendar") &&
-    (scores.people > 0 || scores.semantic > 0.2 || MEETING_MARKERS.some((m) => text.includes(m)))
-  ) {
+  // Calendar reference: EXACTLY ONE side is a calendar event AND the pair is
+  // corroborated. Calendar-calendar pairs are scheduling structure, not a
+  // "mention", and temporal/lexical proximity to a meeting is not a mention of
+  // it — the old marker/semantic path produced 1,706 junk mentions_meeting
+  // links on the live 218-signal graph.
+  if ((anchor.source === "calendar") !== (candidate.source === "calendar") && corroborated) {
     return "mentions_meeting";
   }
 
@@ -198,21 +223,41 @@ export function classifyRelation(
   return "same_topic";
 }
 
-/** Build the structured evidence object for a candidate pair. */
+/**
+ * Build the structured evidence object for a candidate pair.
+ *
+ * `ignorePeople` (graph-ubiquitous people, parent-computed) is filtered HERE
+ * at the producer — not inside `evidenceIsCorroborated` — so every consumer
+ * (the corroboration gates, brief stats, rationale strings shown to humans
+ * and the LLM) inherits the fix: an owner-only pair has empty sharedPeople
+ * and is honestly uncorroborated.
+ */
 export function buildEvidence(
   anchor: Signal,
   candidate: Signal,
   scores: DimensionScores,
   temporalDistanceHours: number,
+  ignorePeople: ReadonlySet<string> = EMPTY_IGNORE,
 ): DotLinkEvidence {
   const sharedEntities = intersectList(
     [...anchor.extracted.entities, ...anchor.extracted.projects],
     [...candidate.extracted.entities, ...candidate.extracted.projects],
   );
-  const sharedPeople = intersectList(
-    [...anchor.extracted.people, ...anchor.actorIds],
+  // Person intersection on normalized keys (original casing preserved), with
+  // bots/domains/ubiquitous people excluded on both sides.
+  const candidateKeys = personKeys(
     [...candidate.extracted.people, ...candidate.actorIds],
+    ignorePeople,
   );
+  const sharedPeople: string[] = [];
+  const seenPeople = new Set<string>();
+  for (const raw of [...anchor.extracted.people, ...anchor.actorIds]) {
+    const key = normalizePersonKey(raw);
+    if (!key || seenPeople.has(key) || !candidateKeys.has(key)) continue;
+    if (!isPersonKey(key) || ignorePeople.has(key)) continue;
+    seenPeople.add(key);
+    sharedPeople.push(raw.trim());
+  }
   const artifactOverlap = intersectList(
     [...anchor.extracted.artifacts, ...(anchor.url ? [anchor.url] : [])],
     [...candidate.extracted.artifacts, ...(candidate.url ? [candidate.url] : [])],
@@ -232,6 +277,10 @@ export function buildEvidence(
     sharedPeople,
     temporalDistanceHours: Math.round(temporalDistanceHours * 100) / 100,
     artifactOverlap: artifactOverlap.length ? artifactOverlap : undefined,
+    // Recorded so the confidence policy can require a topical anchor for the
+    // review queue: "a shared person plus temporal proximity" alone is how
+    // every coworker pair co-occurs, not a reviewable claim.
+    topicalOverlap: Math.round(scores.semantic * 1000) / 1000,
     rationale: rationaleParts.join("; "),
   };
 }

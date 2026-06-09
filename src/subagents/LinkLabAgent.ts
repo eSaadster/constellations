@@ -2,6 +2,8 @@ import type { ToolRegistry, ToolContext } from "../agent/toolRegistry.js";
 import type { Signal } from "../artifacts/Signal.js";
 import type { DotLink } from "../artifacts/DotLink.js";
 import { aggregateConfidence, buildEvidence, type DimensionScores } from "../graph/scoring.js";
+import { normalizePersonKey } from "../graph/discriminative.js";
+import { sameSeries, seriesKeyOf } from "../graph/series.js";
 import { decideLinkStatus } from "../safety/confidencePolicy.js";
 import { evidenceIsCorroborated } from "../artifacts/DotLink.js";
 import type {
@@ -32,14 +34,33 @@ export async function runLinkLab(
   input: LinkLabInput,
   deps: { registry: ToolRegistry; ctx: ToolContext },
 ): Promise<LinkLabResult> {
-  const { anchorSignal, candidateSignals, allowedRelations, thresholdPolicy } = input;
+  const { anchorSignal, candidateSignals, allowedRelations, thresholdPolicy, ubiquitousPeople } =
+    input;
   const { registry, ctx } = deps;
 
-  const proposedLinks: DotLink[] = [];
+  // Graph-ubiquitous people (parent-computed; the lab is sealed) are not
+  // evidence — normalized once, threaded into the people scorer + evidence.
+  const ignorePeople: ReadonlySet<string> = new Set(ubiquitousPeople.map(normalizePersonKey));
+
+  // Proposals carry their candidate so cross-series fan-out can be collapsed
+  // after the loop (one logical claim per series, kept at its best instance).
+  const proposals: Array<{ link: DotLink; candidate: Signal }> = [];
   const exclusions: LinkLabExclusion[] = [];
   const inconclusive: LinkLabInconclusive[] = [];
 
   for (const candidate of candidateSignals) {
+    // Instances of the same recurring series are scheduling structure, not
+    // insight ("Daily Huddle resembles Daily Huddle" was 89% of the live
+    // graph's confirmed links) — never scored, never stored. Pure derivation
+    // from the candidate Signal, so the isolation seal stays intact.
+    if (sameSeries(anchorSignal, candidate)) {
+      exclusions.push({
+        candidateSignalId: candidate.id,
+        reason: "same recurring series — scheduling structure, not insight",
+      });
+      continue;
+    }
+
     const pair = { anchorSignal, candidateSignal: candidate };
 
     // Call the five scoped tools through the generic executor (traced).
@@ -48,9 +69,10 @@ export async function runLinkLab(
       pair,
       ctx,
     )).score;
-    const people = (await registry.execute<typeof pair, { score: number }>(
+    const peoplePair = { ...pair, ignorePeople: [...ignorePeople] };
+    const people = (await registry.execute<typeof peoplePair, { score: number }>(
       "link.score_people_overlap",
-      pair,
+      peoplePair,
       ctx,
     )).score;
     const temporalResult = await registry.execute<
@@ -90,6 +112,7 @@ export async function runLinkLab(
       candidate,
       scores,
       temporalResult.temporalDistanceHours,
+      ignorePeople,
     );
     const corroborated = evidenceIsCorroborated(evidence);
 
@@ -113,14 +136,17 @@ export async function runLinkLab(
       ? [anchorSignal.id, candidate.id]
       : [candidate.id, anchorSignal.id];
 
-    proposedLinks.push({
-      id: ctx.ids.next("link"),
-      sourceSignalId,
-      targetSignalId,
-      relation: finalRelation,
-      confidence: Math.round(confidence * 1000) / 1000,
-      evidence,
-      status: decision.status,
+    proposals.push({
+      link: {
+        id: ctx.ids.next("link"),
+        sourceSignalId,
+        targetSignalId,
+        relation: finalRelation,
+        confidence: Math.round(confidence * 1000) / 1000,
+        evidence,
+        status: decision.status,
+      },
+      candidate,
     });
 
     ctx.trace.confidenceDecision({
@@ -128,6 +154,29 @@ export async function runLinkLab(
       decision: decision.status,
       rationale: decision.reason,
     });
+  }
+
+  // Collapse cross-series fan-out: an anchor that matches N instances of one
+  // recurring series carries ONE insight, not N parallel links (measured live:
+  // ~890 of 2,638 links were duplicate cross-series fan-out). Keep the
+  // best-confidence instance per (series, relation); demote the rest.
+  const bestByNode = new Map<string, DotLink>();
+  for (const { link, candidate } of proposals) {
+    const key = `${seriesKeyOf(candidate) ?? candidate.id}|${link.relation}`;
+    const incumbent = bestByNode.get(key);
+    if (!incumbent || link.confidence > incumbent.confidence) bestByNode.set(key, link);
+  }
+  const winners = new Set([...bestByNode.values()].map((l) => l.id));
+  const proposedLinks: DotLink[] = [];
+  for (const { link, candidate } of proposals) {
+    if (winners.has(link.id)) {
+      proposedLinks.push(link);
+    } else {
+      exclusions.push({
+        candidateSignalId: candidate.id,
+        reason: `collapsed into best instance of recurring series "${seriesKeyOf(candidate)}"`,
+      });
+    }
   }
 
   return { proposedLinks, exclusions, inconclusive };
