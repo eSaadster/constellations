@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-import { resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { createConstellationRuntime } from "../../agent/runtime.js";
 import { FileGraphStore } from "../../graph/fileStore.js";
 import { createConnectors } from "../../connectors/index.js";
 import { runEvalCase, runAllEvals, getEvalCase, listEvalCaseNames } from "../../evals/index.js";
 import { runModelDriven } from "../../agent/piModelDriver.js";
+import { generateBrief } from "../../agent/brief.js";
+import { IdGenerator } from "../../util/ids.js";
 import { createLogger, setLogger } from "../../observability/logger.js";
 
 /**
@@ -14,21 +17,33 @@ import { createLogger, setLogger } from "../../observability/logger.js";
  *   constellation health
  *   constellation ingest-fixtures
  *   constellation connect <signalId>
+ *   constellation connect-all [--dedupe]   (connect every signal in one pass)
  *   constellation context-card <signalId>
  *   constellation eval [caseName]
  *   constellation signals            (list ingested signals + ids)
  *   constellation model "<task>"     (model-driven path; needs a gateway + key)
+ *   constellation brief               (LLM daily brief over the graph; needs a gateway + key)
  *
  * Graph state persists to ./.constellation/graph.json so ingest + connect work
  * across separate invocations. The deterministic commands need NO API key; only
- * `model` requires a gateway base URL + key (loaded from .env).
+ * `model` and `brief` require a gateway base URL + key (loaded from .env).
+ * `brief` writes its JSON artifact to ./.constellation/brief.json
+ * (CONSTELLATION_BRIEF overrides).
  */
 
 const GRAPH_PATH = resolve(process.env.CONSTELLATION_GRAPH ?? "./.constellation/graph.json");
 
 function buildRuntime(): { runtime: ReturnType<typeof createConstellationRuntime>; store: FileGraphStore } {
   const store = new FileGraphStore(GRAPH_PATH);
-  const runtime = createConstellationRuntime({ store, connectors: createConnectors() });
+  // Resume id numbering past what is already persisted: a fresh process counter
+  // restarting at sig_1/link_1 would silently overwrite existing entities.
+  const ids = new IdGenerator();
+  ids.seedFromIds([
+    ...store.listSignals().map((s) => s.id),
+    ...store.listLinks().map((l) => l.id),
+    ...store.listConstellations().map((c) => c.id),
+  ]);
+  const runtime = createConstellationRuntime({ store, connectors: createConnectors(), ids });
   return { runtime, store };
 }
 
@@ -43,14 +58,17 @@ Usage:
   constellation ingest-fixtures
   constellation signals
   constellation connect <signalId>
+  constellation connect-all [--dedupe]
   constellation context-card <signalId>
   constellation eval [caseName]
   constellation model "<task>"
+  constellation brief
 
-The model command uses the LLM-backed path. Configure a gateway in .env:
+The model and brief commands use the LLM-backed path. Configure a gateway in .env:
   ANTHROPIC_BASE_URL   custom Anthropic-compatible gateway URL
   ANTHROPIC_API_KEY    your gateway key
   CONSTELLATION_MODEL  wire model id (default: glm-5.1)
+  CONSTELLATION_BRIEF  output path for the brief (default: ./.constellation/brief.json)
 
 A connection is not a vibe. It is an evidence-backed claim.`;
 
@@ -127,6 +145,18 @@ async function main(): Promise<void> {
       return;
     }
 
+    case "connect-all": {
+      const dedupe = args.includes("--dedupe");
+      const { runtime, store } = buildRuntime();
+      if (runtime.store.listSignals().length === 0) {
+        return fail("no signals to connect — run `constellation ingest-fixtures` first");
+      }
+      const result = await runtime.connectAll({ dedupe });
+      store.save();
+      print({ dedupe, ...result });
+      return;
+    }
+
     case "context-card": {
       const signalId = args[0];
       if (!signalId) return fail("context-card requires <signalId>");
@@ -168,6 +198,29 @@ async function main(): Promise<void> {
         store.save();
         // Model output is prose, not a JSON artifact — print it raw.
         console.log(text.trim());
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+      return;
+    }
+
+    case "brief": {
+      const { runtime, store } = buildRuntime();
+      if (runtime.store.listSignals().length === 0) {
+        return fail("no signals to brief — run `constellation ingest-fixtures` first");
+      }
+      // Computed here (not at module init) so a CONSTELLATION_BRIEF set in .env
+      // — which is loaded inside main() — is honored.
+      const briefPath = resolve(process.env.CONSTELLATION_BRIEF ?? "./.constellation/brief.json");
+      try {
+        // Deterministic analytics + full graph dump go into one prompt; the
+        // live model call takes 30–120s. SourceUnavailableError (no gateway
+        // configured) surfaces via fail() below, like the `model` command.
+        const brief = await generateBrief(runtime);
+        store.save();
+        mkdirSync(dirname(briefPath), { recursive: true });
+        writeFileSync(briefPath, `${JSON.stringify(brief, null, 2)}\n`, "utf8");
+        print({ headline: brief.headline, insights: brief.insights.length, path: briefPath });
       } catch (err) {
         return fail(err instanceof Error ? err.message : String(err));
       }

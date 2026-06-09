@@ -85,6 +85,48 @@ export class ComposioConnector implements SourceConnector {
   }
 
   /**
+   * Execute a batch of tool calls in ONE meta-router round trip (it runs up to
+   * 50 in parallel). Returns index-aligned per-call outcomes; an individual
+   * failure (e.g. Slack not_in_channel) becomes { ok: false } instead of
+   * throwing, so callers can skip and continue.
+   */
+  private async execMany(
+    tools: Array<{ tool_slug: string; arguments: JsonObject }>,
+  ): Promise<Array<{ ok: boolean; data?: unknown; error?: string }>> {
+    if (tools.length === 0) return [];
+    const raw = await this.bridge.callTool({
+      server: this.serverName,
+      tool: COMPOSIO_MULTI_EXECUTE_TOOL,
+      args: { tools, sync_response_to_workbench: false },
+    });
+    const envelope = isObject(raw) ? raw : undefined;
+    const results =
+      (isObject(envelope?.data) ? envelope!.data.results : undefined) ?? envelope?.results;
+    const out: Array<{ ok: boolean; data?: unknown; error?: string }> = tools.map(() => ({
+      ok: false,
+      error: "missing result",
+    }));
+    if (!Array.isArray(results)) return out;
+    results.forEach((entry, position) => {
+      if (!isObject(entry)) return;
+      const index = typeof entry.index === "number" ? entry.index : position;
+      // The router's index has been observed 0-based and positional; clamp into range.
+      const slot = index >= 0 && index < out.length ? index : position;
+      if (slot < 0 || slot >= out.length) return;
+      const response = isObject(entry.response) ? entry.response : entry;
+      if (isObject(response) && response.successful === false) {
+        out[slot] = { ok: false, error: asString(response.error) ?? "tool failed" };
+        return;
+      }
+      const data = isObject(response)
+        ? response.data ?? response.data_preview ?? response
+        : response;
+      out[slot] = { ok: true, data };
+    });
+    return out;
+  }
+
+  /**
    * Two-layer unwrap of the MULTI_EXECUTE envelope:
    *   parsed.data.results[i].response.data
    * Primary path is known from live discovery; defensive fallbacks degrade to
@@ -148,22 +190,36 @@ export class ComposioConnector implements SourceConnector {
         return this.container(payload).map((m) => this.mapGmail(m));
       }
       case "slack": {
-        const channel = await this.resolveSlackChannel(query);
-        // No channel configured (no containerId, no COMPOSIO_SLACK_CHANNEL, no
-        // query to discover one) -> nothing to read. Skip gracefully rather than
-        // throw, so a composio ingest of the other sources still succeeds.
-        if (!channel) return [];
-        // Over-fetch a single page then filter: Slack's `limit` applies BEFORE
-        // we drop channel_join/system events, so a small limit can otherwise
-        // yield zero real messages. Cap the fetch to stay well under rate
-        // limits (no pagination).
-        const want = query.limit ?? 10;
-        const fetchN = Math.min(Math.max(want * 4, 20), 50);
-        const payload = await this.exec(slugs.list, this.slackArgs(query, channel, fetchN));
-        const items = this.container(payload)
-          .filter((m) => m.subtype !== "channel_join")
-          .map((m) => this.mapSlack(m, channel));
-        return items.slice(0, want);
+        const channels = await this.resolveSlackChannels(query);
+        // No channels reachable (and none configured) -> nothing to read. Skip
+        // gracefully rather than throw, so a composio ingest of the other
+        // sources still succeeds.
+        if (channels.length === 0) return [];
+        // Window: everything since `query.since`, defaulting to the last 24h.
+        const since =
+          query.since ?? new Date(Date.now() - 24 * 3_600_000).toISOString();
+        const windowed = { ...query, since };
+        // One batched meta-router call covers every channel; per-channel
+        // failures (not_in_channel, archived) are skipped, which effectively
+        // restricts the sweep to channels this account can read.
+        const perChannel = Math.min(query.limit ?? 50, 200);
+        const results = await this.execMany(
+          channels.map((channel) => ({
+            tool_slug: slugs.list,
+            arguments: this.slackArgs(windowed, channel, perChannel),
+          })),
+        );
+        const items: RawSourceItem[] = [];
+        results.forEach((result, i) => {
+          if (!result.ok) return;
+          const channel = channels[i]!;
+          for (const m of this.container(result.data)) {
+            if (m.subtype === "channel_join") continue;
+            items.push(this.mapSlack(m, channel));
+          }
+        });
+        items.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+        return query.limit ? items.slice(0, query.limit) : items;
       }
       case "calendar": {
         const calendarId = query.containerId ?? this.config.calendarId ?? DEFAULT_CALENDAR_ID;
@@ -213,11 +269,19 @@ export class ComposioConnector implements SourceConnector {
         return isObject(payload) ? this.mapCalendar(payload, calendarId) : undefined;
       }
       case "slack": {
-        // No clean single-message fetch. externalId is "channel:ts"; re-list the
-        // channel window and find the matching ts.
+        // No clean single-message fetch. externalId is "channel:ts"; re-list a
+        // window AROUND the message's own timestamp (the default list window is
+        // the last 24h, which would miss older messages).
         const [channel, ts] = externalId.split(":");
         if (!channel || !ts) return undefined;
-        const items = await this.list({ containerId: channel, limit: 100 });
+        const ms = parseFloat(ts) * 1000;
+        if (Number.isNaN(ms)) return undefined;
+        const items = await this.list({
+          containerId: channel,
+          since: new Date(ms - 3_600_000).toISOString(),
+          until: new Date(ms + 3_600_000).toISOString(),
+          limit: 100,
+        });
         return items.find((i) => i.externalId === externalId);
       }
       default:
@@ -233,21 +297,20 @@ export class ComposioConnector implements SourceConnector {
   private gmailArgs(query: ConnectorQuery): JsonObject {
     const parts: string[] = [];
     if (query.query) parts.push(query.query);
-    if (query.since) parts.push(`after:${this.gmailDate(query.since)}`);
-    if (query.until) parts.push(`before:${this.gmailDate(query.until)}`);
-    const args: JsonObject = { max_results: query.limit ?? 10 };
+    if (query.since) parts.push(`after:${this.gmailTime(query.since)}`);
+    if (query.until) parts.push(`before:${this.gmailTime(query.until)}`);
+    const args: JsonObject = { max_results: query.limit ?? 100 };
     if (parts.length > 0) args.query = parts.join(" ");
     return args;
   }
 
-  /** Gmail search dates are YYYY/MM/DD. */
-  private gmailDate(iso: string): string {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-    const day = String(d.getUTCDate()).padStart(2, "0");
-    return `${y}/${m}/${day}`;
+  /**
+   * Gmail search accepts epoch seconds in after:/before:, which keeps the
+   * since-cursor precise to the second (YYYY/MM/DD would re-fetch whole days).
+   */
+  private gmailTime(iso: string): string {
+    const ms = Date.parse(iso);
+    return Number.isNaN(ms) ? iso : String(Math.floor(ms / 1000));
   }
 
   /** Slack uses channel/limit/oldest/latest; channel is the conversation id. */
@@ -264,25 +327,30 @@ export class ComposioConnector implements SourceConnector {
     return Number.isNaN(ms) ? iso : String(ms / 1000);
   }
 
-  /** Calendar uses camelCase args. */
+  /**
+   * Calendar uses camelCase args. The rolling window (30d back, 45d forward)
+   * plus the ingest-side externalId dedupe is what makes repeated runs pick up
+   * only NEW events: known instances are skipped upstream, new ones flow in.
+   */
   private calendarArgs(query: ConnectorQuery, calendarId: string): JsonObject {
     return {
       calendarId,
       timeMin: query.since ?? new Date(Date.now() - 30 * 86400_000).toISOString(),
       timeMax: query.until ?? new Date(Date.now() + 45 * 86400_000).toISOString(),
-      maxResults: query.limit ?? 10,
+      maxResults: query.limit ?? 100,
       singleEvents: true,
       orderBy: "startTime",
     };
   }
 
   /**
-   * Resolve a Slack channel id: explicit containerId, else discover by query,
-   * else the configured COMPOSIO_SLACK_CHANNEL. Returns undefined when none is
-   * available (caller skips Slack) — there is no safe hardcoded default.
+   * Resolve the Slack channels to read: an explicit containerId wins, then a
+   * text query (channel discovery), then ALL workspace conversations
+   * (SLACK_LIST_CONVERSATIONS), then the configured COMPOSIO_SLACK_CHANNEL.
+   * Returns [] when nothing is reachable (caller skips Slack).
    */
-  private async resolveSlackChannel(query: ConnectorQuery): Promise<string | undefined> {
-    if (query.containerId) return query.containerId;
+  private async resolveSlackChannels(query: ConnectorQuery): Promise<string[]> {
+    if (query.containerId) return [query.containerId];
     const slugs = SOURCE_SLUGS.slack;
     if (slugs?.findChannels && query.query) {
       try {
@@ -290,12 +358,30 @@ export class ComposioConnector implements SourceConnector {
         const channels = isObject(payload) && Array.isArray(payload.channels) ? payload.channels : [];
         const first = channels.find(isObject);
         const id = first ? asString(first.id) : undefined;
-        if (id) return id;
+        if (id) return [id];
+      } catch {
+        // fall through to the full sweep
+      }
+    }
+    if (slugs?.listConversations) {
+      try {
+        const payload = await this.exec(slugs.listConversations, {
+          types: "public_channel,private_channel",
+          exclude_archived: true,
+          limit: 100,
+        });
+        const channels = isObject(payload) && Array.isArray(payload.channels) ? payload.channels : [];
+        const ids = channels
+          .filter(isObject)
+          .map((c) => asString(c.id))
+          .filter((id): id is string => Boolean(id));
+        // One meta-router batch executes up to 50 tools; cap the sweep there.
+        if (ids.length > 0) return ids.slice(0, 50);
       } catch {
         // fall through to the configured channel
       }
     }
-    return this.config.slackChannel;
+    return this.config.slackChannel ? [this.config.slackChannel] : [];
   }
 
   // ---------------------------------------------------------------------------

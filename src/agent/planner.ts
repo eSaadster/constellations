@@ -35,7 +35,10 @@ export function buildIngestItemSteps(item: RawSourceItem, index: number): PlanSt
 }
 
 /** Fetch step for one source's raw items (used before per-item pipelines). */
-export function buildFetchStep(source: string): PlanStep {
+export function buildFetchStep(
+  source: string,
+  query: { since?: string; until?: string; limit?: number } = {},
+): PlanStep {
   const tool = SOURCE_LIST_TOOL[source];
   if (!tool) throw new Error(`no list tool for source ${source}`);
   return {
@@ -43,7 +46,7 @@ export function buildFetchStep(source: string): PlanStep {
     phase: "fetch",
     toolName: tool,
     reason: `list raw items from ${source}`,
-    literalInput: {},
+    literalInput: { ...query },
   };
 }
 
@@ -92,6 +95,19 @@ export function buildConnectPlan(anchorSignalId: string): Plan {
   return {
     goal: `Connect dots for ${anchorSignalId}`,
     steps: buildConnectSteps(anchorSignalId),
+  };
+}
+
+/**
+ * Discovery-only chain: candidates -> LinkLab -> collect, WITHOUT the commit and
+ * cluster steps. `connect-all` runs this for every anchor to gather proposed
+ * links across the whole graph before a single dedupe + commit + cluster pass.
+ */
+export function buildDiscoverPlan(anchorSignalId: string): Plan {
+  const discoverStepIds = new Set(["find", "lab", "collect"]);
+  return {
+    goal: `Discover candidate links for ${anchorSignalId}`,
+    steps: buildConnectSteps(anchorSignalId).filter((s) => discoverStepIds.has(s.id)),
   };
 }
 

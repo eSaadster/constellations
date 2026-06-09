@@ -12,7 +12,7 @@ import type { Constellation } from "../artifacts/Constellation.js";
  */
 
 export interface GraphMutationEvent {
-  op: "add_node" | "add_edge" | "update_edge" | "upsert_cluster" | "merge_cluster";
+  op: "add_node" | "add_edge" | "update_edge" | "remove_edge" | "upsert_cluster" | "merge_cluster";
   entityType: "Signal" | "DotLink" | "Constellation";
   entityId: string;
 }
@@ -32,6 +32,8 @@ export interface GraphStore {
   // DotLinks (edges)
   addLink(link: DotLink): DotLink;
   updateLink(id: string, patch: Partial<DotLink>): DotLink;
+  /** Remove a link by id. Returns true if a link was removed. */
+  removeLink(id: string): boolean;
   getLink(id: string): DotLink | undefined;
   listLinks(): DotLink[];
   linksForSignal(signalId: string): DotLink[];

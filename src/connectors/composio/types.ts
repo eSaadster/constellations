@@ -56,8 +56,11 @@ export interface SourceSlugs {
   list: string;
   /** Single-item hydrate slug (empty string if none). */
   fetchById: string;
-  /** Slack-only: channel discovery slug. */
+  /** Slack-only: channel discovery slug (search by query). */
   findChannels?: string;
+  /** Slack-only: enumerate workspace conversations (confirmed live: returns
+   * data.channels[] with id + name). */
+  listConversations?: string;
 }
 
 export const SOURCE_SLUGS: Partial<Record<SignalSource, SourceSlugs>> = {
@@ -69,6 +72,7 @@ export const SOURCE_SLUGS: Partial<Record<SignalSource, SourceSlugs>> = {
     list: "SLACK_FETCH_CONVERSATION_HISTORY",
     fetchById: "",
     findChannels: "SLACK_FIND_CHANNELS",
+    listConversations: "SLACK_LIST_CONVERSATIONS",
   },
   calendar: {
     list: "GOOGLECALENDAR_EVENTS_LIST",

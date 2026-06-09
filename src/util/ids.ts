@@ -12,6 +12,23 @@ export class IdGenerator {
     return this.seed ? `${prefix}_${this.seed}_${n}` : `${prefix}_${n}`;
   }
 
+  /**
+   * Advance counters past existing ids so a new process resumes numbering
+   * instead of restarting at 1 (which would silently overwrite persisted
+   * entities that share the id). Accepts any id shaped `prefix_N` or
+   * `prefix_anything_N`; unparseable ids are ignored.
+   */
+  seedFromIds(ids: Iterable<string>): void {
+    for (const id of ids) {
+      const match = /^([a-z]+)_(?:.*_)?(\d+)$/i.exec(id);
+      if (!match) continue;
+      const [, prefix, num] = match;
+      const n = Number(num);
+      if (!prefix || !Number.isFinite(n)) continue;
+      if (n > (this.counters.get(prefix) ?? 0)) this.counters.set(prefix, n);
+    }
+  }
+
   reset(): void {
     this.counters.clear();
   }

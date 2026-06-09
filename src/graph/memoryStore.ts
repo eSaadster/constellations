@@ -80,6 +80,12 @@ export class MemoryGraphStore implements GraphStore {
     return updated;
   }
 
+  removeLink(id: string): boolean {
+    const removed = this.links.delete(id);
+    if (removed) this.emit({ op: "remove_edge", entityType: "DotLink", entityId: id });
+    return removed;
+  }
+
   getLink(id: string): DotLink | undefined {
     return this.links.get(id);
   }
