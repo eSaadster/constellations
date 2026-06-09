@@ -70,6 +70,37 @@ export const graphTools: ToolDefinition<any, any>[] = [
   }),
 
   defineTool({
+    name: "graph.read_signal",
+    description:
+      "Read a single Signal node's full contents (source, title, excerpt, actors, timestamp, extracted facts, provenance) by id. Returns signal: null if no such id exists.",
+    inputSchema: z.object({ signalId: z.string() }),
+    outputSchema: z.object({ signal: SignalSchema.nullable() }),
+    consumes: ["Signal"],
+    produces: [],
+    sideEffects: "none",
+    riskLevel: "low",
+    requiredConsentScopes: [],
+    handler: async ({ signalId }, ctx) => ({ signal: ctx.store.getSignal(signalId) ?? null }),
+  }),
+
+  defineTool({
+    name: "graph.list_signals",
+    description:
+      "List all Signal nodes in the graph with their full contents. The canonical way to enumerate and introspect signals; returns the total count alongside the signals.",
+    inputSchema: z.object({}),
+    outputSchema: z.object({ signals: z.array(SignalSchema), count: z.number() }),
+    consumes: ["Signal"],
+    produces: [],
+    sideEffects: "none",
+    riskLevel: "low",
+    requiredConsentScopes: [],
+    handler: async (_input, ctx) => {
+      const signals = ctx.store.listSignals();
+      return { signals, count: signals.length };
+    },
+  }),
+
+  defineTool({
     name: "graph.get_neighbors",
     description: "Get the neighboring signals (and connecting links) of a signal.",
     inputSchema: z.object({ signalId: z.string() }),

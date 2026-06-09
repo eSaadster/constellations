@@ -81,26 +81,84 @@ export function constellationPiTools(runtime: ConstellationRuntime): PiToolDefin
 export interface RunModelDrivenOptions {
   task: string;
   runtime?: ConstellationRuntime;
+  /** Logical provider name registered with the model registry. Defaults to "constellation-gateway". */
   provider?: string;
+  /** Wire model id sent to the gateway. Defaults to env CONSTELLATION_MODEL or "glm-5.1". */
   modelId?: string;
+  /** Anthropic-compatible gateway base URL. Defaults to env ANTHROPIC_BASE_URL. */
+  baseUrl?: string;
+  /** API key for the gateway. Defaults to env ANTHROPIC_API_KEY. */
+  apiKey?: string;
 }
+
+const DEFAULT_PROVIDER = "constellation-gateway";
+const DEFAULT_MODEL_ID = "glm-5.1";
 
 /**
  * Run a model-driven session: hand the registry to a Pi AgentSession and let the
  * model orchestrate. Returns the assistant's final text.
  *
- * NOTE: the JSON-Schema -> Pi tool-parameter bridge is best-effort; see the TODO
- * below. The deterministic orchestrator is the supported path for the scaffold.
+ * The base URL + API key + model id reach the wire through a Model object built
+ * by an in-memory ModelRegistry (registerProvider -> find), NOT through env vars
+ * read by the SDK: on the direct-session path the Anthropic provider always
+ * passes `baseURL`/`apiKey` explicitly, so ANTHROPIC_BASE_URL is ignored. We
+ * therefore read the gateway config ourselves and register it as a custom
+ * provider. `authHeader` is left UNSET so the gateway gets Anthropic-native
+ * `x-api-key` auth (setting it would send `Authorization: Bearer`, the OpenAI
+ * convention, which an Anthropic-compatible gateway does not expect).
+ *
+ * The deterministic orchestrator remains the supported offline path.
  */
 export async function runModelDriven(opts: RunModelDrivenOptions): Promise<string> {
   const runtime = opts.runtime ?? new ConstellationRuntime();
 
   // Lazy, optional import — never required at build time.
   const sdk: any = await import("@earendil-works/pi-coding-agent").catch(() => null);
-  if (!sdk?.createAgentSession || !sdk?.defineTool) {
+  if (!sdk?.createAgentSession || !sdk?.defineTool || !sdk?.ModelRegistry || !sdk?.AuthStorage) {
     throw new SourceUnavailableError(
       "@earendil-works/pi-coding-agent not available; install it and configure an API key to use the model-driven path",
       {},
+    );
+  }
+
+  const provider = opts.provider ?? DEFAULT_PROVIDER;
+  const modelId = opts.modelId ?? process.env.CONSTELLATION_MODEL ?? DEFAULT_MODEL_ID;
+  const baseUrl = opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL;
+  const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
+  if (!baseUrl || !apiKey) {
+    throw new SourceUnavailableError(
+      "model-driven path requires a gateway base URL and API key; set ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY (see .env.example)",
+      { hasBaseUrl: Boolean(baseUrl), hasApiKey: Boolean(apiKey) },
+    );
+  }
+
+  // Build the Model via an in-memory registry: registerProvider() pushes the
+  // model (with our gateway baseUrl) into the registry, find() reads it back,
+  // and createAgentSession resolves the key via getApiKeyAndHeaders.
+  const authStorage = sdk.AuthStorage.inMemory();
+  const modelRegistry = sdk.ModelRegistry.inMemory(authStorage);
+  modelRegistry.registerProvider(provider, {
+    baseUrl,
+    apiKey,
+    api: "anthropic-messages",
+    // NOTE: authHeader intentionally unset -> Anthropic-native x-api-key.
+    models: [
+      {
+        id: modelId,
+        name: modelId,
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 65536,
+      },
+    ],
+  });
+  const model = modelRegistry.find(provider, modelId);
+  if (!model) {
+    throw new SourceUnavailableError(
+      `model-driven path could not resolve model ${provider}/${modelId} from the registry`,
+      { provider, modelId },
     );
   }
 
@@ -110,8 +168,12 @@ export async function runModelDriven(opts: RunModelDrivenOptions): Promise<strin
       name: t.name,
       label: t.label,
       description: t.description,
-      // TODO: convert JSON Schema -> TypeBox precisely. Pi accepts a JSON-Schema-
-      // shaped object; we pass it through and validate in our own execute path.
+      // `t.parameters` is a faithful JSON Schema from zodToJsonSchema (bounds,
+      // formats, defaults, enums, nested objects/arrays preserved). The Pi
+      // Anthropic provider forwards `.properties`/`.required` verbatim into the
+      // model-facing `input_schema`, so no TypeBox compilation happens at this
+      // seam — passing the JSON-Schema object through is exactly correct. Inputs
+      // are re-validated against the real Zod schema in our own execute() path.
       parameters: t.parameters,
       execute: async (toolCallId: string, params: unknown) => {
         const result = await t.execute(toolCallId, params);
@@ -121,12 +183,12 @@ export async function runModelDriven(opts: RunModelDrivenOptions): Promise<strin
   );
 
   const { session } = await sdk.createAgentSession({
+    model,
+    modelRegistry,
+    authStorage,
     customTools,
     tools: ["read", ...customTools.map((t: { name: string }) => t.name)],
     systemPromptOverride: () => SYSTEM_PROMPT,
-    ...(opts.provider && opts.modelId
-      ? { model: sdk.getModel?.(opts.provider, opts.modelId) }
-      : {}),
   });
 
   let text = "";

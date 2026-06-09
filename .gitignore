@@ -7,3 +7,5 @@ coverage/
 .DS_Store
 .pi/
 .claude/
+.constellation/
+.osgrep/
