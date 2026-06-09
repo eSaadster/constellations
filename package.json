@@ -1,0 +1,38 @@
+{
+  "name": "constellation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Constellation — a personal context-graph agent that discovers evidence-backed relationships between fragments of work life. A connection is not a vibe; it is an evidence-backed claim.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "constellation": "./dist/interfaces/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cli": "tsx src/interfaces/cli/index.ts",
+    "rpc": "tsx src/agent/rpcServer.ts",
+    "slack": "tsx src/interfaces/slack/piMomBot.ts",
+    "eval": "tsx src/evals/run.ts"
+  },
+  "dependencies": {
+    "pino": "^9.5.0",
+    "zod": "^3.23.8"
+  },
+  "optionalDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@mariozechner/pi-mom": "^0.70.6",
+    "mcporter": "^0.11.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

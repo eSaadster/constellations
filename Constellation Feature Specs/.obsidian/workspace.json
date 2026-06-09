@@ -1,0 +1,191 @@
+{
+  "main": {
+    "id": "88c9b5e03024073f",
+    "type": "split",
+    "children": [
+      {
+        "id": "71d763351769377c",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "f7b820590a72f383",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "07-Templates/Feature Spec Template.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Feature Spec Template"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "bbe8d35738927a3c",
+    "type": "split",
+    "children": [
+      {
+        "id": "39bbc097ebb1ac3f",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "76cfbf8de6dfc82c",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "3b81771dac086d85",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "be330973b0884689",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "fd5fdcb2fd23c73a",
+    "type": "split",
+    "children": [
+      {
+        "id": "373669fa91464c7a",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "632b189cbc5acefb",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "07-Templates/Feature Spec Template.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for Feature Spec Template"
+            }
+          },
+          {
+            "id": "39b4a36442f2103e",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "07-Templates/Feature Spec Template.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from Feature Spec Template"
+            }
+          },
+          {
+            "id": "5a3d35482c52e750",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "4fe5d0240b4bf21e",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "f7b820590a72f383",
+  "lastOpenFiles": [
+    "04-Subagents/LinkLabAgent.md",
+    "00-Index/Five Properties.md",
+    "02-Architecture/Long-Horizon Execution Strategy.md",
+    "02-Architecture/Constellation Domain Model.md",
+    "02-Architecture/Composable Tool Chains.md",
+    "04-Subagents/Subagent Orchestration.md",
+    "05-Production/Production Scaffolding.md",
+    "06-Evals/Evaluation Harness.md",
+    "07-Templates/pi-ai/orchestrator.ts.md",
+    "09-Pi-AI-Scaffolding/Agent Ready Build Prompt.md",
+    "09-Pi-AI-Scaffolding/Pi AI Implementation Scaffold.md",
+    "07-Templates/Feature Spec Template.md",
+    "01-Feature-Specs/DotLink Scoring and Review.md",
+    "07-Templates/pi-ai/pi-core-ai-runtime.ts.md",
+    "03-Tools/Tool Namespace Registry.md",
+    "09-Pi-AI-Scaffolding/pi-core-ai Runtime Architecture.md",
+    "01-Feature-Specs/Context Card Generation.md",
+    "00-Index/Home.md"
+  ]
+}
