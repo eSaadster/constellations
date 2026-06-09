@@ -4,7 +4,7 @@
 
 Constellation is a personal **context-graph agent**. It does not summarize apps — it discovers *defensible* relationships between fragments of your work life (Slack, email, calendar, meeting notes, docs) and explains each connection with structured evidence and a confidence score.
 
-This repository is the **initial production scaffold**: a deployable TypeScript/Node service with clean boundaries, fixture-backed mock connectors, a model-driven tool registry, an isolated forensic subagent, an evaluation harness, and full observability/resilience plumbing. It runs **entirely locally with no credentials**.
+This repository is a deployable TypeScript/Node service with clean boundaries: **live Composio-backed connectors** (Gmail, Slack, Calendar — via the mcporter MCP bridge), a model-driven tool registry, an isolated forensic subagent, an **LLM-narrated daily brief**, an evaluation harness, and full observability/resilience plumbing. The deterministic core (ingest → connect → context-card) runs **entirely locally with no credentials** on fixture-backed mocks; real connectors and the LLM paths opt in via `.env`.
 
 ---
 
@@ -37,21 +37,22 @@ This is verified by the `false_friend_topic` eval: the false friend lands at **c
 ```
 src/
   agent/
-    runtime.ts          # ConstellationRuntime: ingest / connect / context-card / health
+    runtime.ts          # ConstellationRuntime: ingest / connect / connect-all / context-card / health
     orchestrator.ts     # generic plan executor (no per-tool branching)
     planner.ts          # builds declared tool-call plans (data, not if/else)
     contextStrategy.ts  # plan / call / evidence ledgers (long-horizon coherence)
     toolRegistry.ts     # single source of truth; generic execute() + toPiTools()
     rpcServer.ts        # JSONL RPC service (health/ingest/connect/context-card/eval)
-    piModelDriver.ts    # model-driven tool selection via the Pi SDK (optional)
+    piModelDriver.ts    # model-driven tool selection via the Pi SDK (gateway-configurable)
+    brief.ts            # deterministic graph analytics -> LLM-narrated daily brief
     jsonSchema.ts       # zod -> JSON Schema (for the model-selection seam)
   artifacts/            # Signal, DotLink, Constellation, ContextCard (zod)
   connectors/
     types.ts            # SourceConnector adapter boundary
     mock.ts, fixtures.ts# fixture-backed mock connectors
-    mcporter/           # mcporter bridge (lazy, env-config, TODOs)
-    composio/           # Composio connector (lazy, via mcporter)
-  tools/                # ~89 tools across 12 namespaces (see below)
+    mcporter/           # LIVE mcporter bridge (createRuntime over remote MCP + headers)
+    composio/           # LIVE Composio connector (gmail/slack/googlecalendar via meta-router)
+  tools/                # ~91 tools across 12 namespaces (see below)
   subagents/
     SubagentRuntime.ts  # REAL isolation: scoped registry + sealed state
     LinkLabAgent.ts     # forensic link scoring lab
@@ -75,7 +76,7 @@ src/
 
 ### Tool registry — model-driven, not hand-routed
 
-The registry (`src/agent/toolRegistry.ts`) is the **single source of truth** for ~89 tools across 12 namespaces (`slack.* email.* calendar.* meeting.* doc.* signal.* link.* graph.* constellation.* brief.* consent.* subagent.*`). Each tool carries: name, namespace, description, zod input/output schemas, `consumes`/`produces` artifact types, `sideEffects`, `riskLevel`, `requiredConsentScopes`, optional `rateLimitKey`/`retryPolicy`, and a handler.
+The registry (`src/agent/toolRegistry.ts`) is the **single source of truth** for ~91 tools across 12 namespaces (`slack.* email.* calendar.* meeting.* doc.* signal.* link.* graph.* constellation.* brief.* consent.* subagent.*`). Each tool carries: name, namespace, description, zod input/output schemas, `consumes`/`produces` artifact types, `sideEffects`, `riskLevel`, `requiredConsentScopes`, optional `rateLimitKey`/`retryPolicy`, and a handler.
 
 Dispatch is **data-driven**: the orchestrator runs a declared `Plan` (an array of typed steps wired through a call ledger) and every tool is invoked through one generic `registry.execute(name, input, ctx)`. There is **no `switch(toolName)`** anywhere. `registry.toPiTools()` exposes the same registry to a real model (the Pi SDK) so an LLM can choose tools by metadata — verified by a test that asserts every entry yields a valid Pi tool def.
 
@@ -101,12 +102,13 @@ Chain-critical tools have real fixture-backed handlers; the rest are generated b
 
 ```bash
 npm install        # installs zod + pino + dev tooling; integrations are optional deps
+npm run typecheck  # tsc --noEmit (npm test does NOT typecheck)
 npm run build      # tsc -> dist/
-npm test           # vitest: 63 tests
+npm test           # vitest: 100+ tests
 npm run eval       # run all 5 eval cases
 ```
 
-> The core runs with **no API keys**. Pi SDK, `@mariozechner/pi-mom`, and `mcporter` are `optionalDependencies` loaded lazily behind adapter interfaces.
+> The deterministic core runs with **no API keys**. Pi SDK, `@mariozechner/pi-mom`, and `mcporter` are `optionalDependencies` loaded lazily behind adapter interfaces. Live connectors and the LLM-backed `model`/`brief` commands are configured in `.env` (see `.env.example`).
 
 ### CLI
 
@@ -116,15 +118,24 @@ npm's run-banner doesn't precede the JSON — or call `node dist/interfaces/cli/
 ```bash
 # via tsx (dev) — or `node dist/interfaces/cli/index.js <cmd>` after build
 npm run cli -- health
-npm run cli -- ingest-fixtures        # ingest demo signals (persists to ./.constellation/graph.json)
+npm run cli -- ingest-fixtures        # ingest signals (mock fixtures, or live sources in composio mode)
 npm run cli -- signals                # list ingested signals + ids
-npm run cli -- connect sig_2          # connect dots for a signal
+npm run cli -- connect sig_2          # connect dots for one anchor signal
+npm run cli -- connect-all --dedupe   # connect EVERY signal in one idempotent pass
 npm run cli -- context-card sig_2     # generate the evidence-cited Context Card
+npm run cli -- brief                  # LLM daily brief -> ./.constellation/brief.json (needs gateway)
+npm run cli -- model "list my signals" # ad-hoc model-driven session (needs gateway)
 npm run cli -- eval                   # run all eval cases
 npm run cli -- eval false_friend_topic
 ```
 
-Example: `ingest-fixtures` runs **39 composable tool calls** (normalize → extract×5 → persist, per item) across the call ledger; `context-card sig_2` returns *"2 confirmed, 1 proposed, 0 quarantined connection(s)"* with 3 provenance-verified claims.
+Ingest is **incremental and idempotent**: items are deduped by `source:externalId` and id numbering resumes past persisted entities, so re-runs add only what's new and never overwrite. The daily insight loop is:
+
+```bash
+ingest-fixtures && connect-all --dedupe && brief
+```
+
+`brief` computes ~15 deterministic graph analytics (orphans, actor frequency, off-hours activity, calendar collisions, cluster cohesion, staleness…), hands them plus a full graph dump to the model, and writes an urgency-ranked, **citation-checked** insight digest to `.constellation/brief.json` — insights citing unknown signal ids are discarded (the product law survives the LLM layer). Malformed model output degrades to a markdown fallback instead of failing.
 
 ### RPC service
 
@@ -142,9 +153,18 @@ npm run rpc
 
 Each response is `{"id","type":"response","command","success","data"|"error"}`.
 
-### Model-driven path (optional, Pi SDK)
+### Model-driven path (`model` / `brief`, Pi SDK)
 
-`src/agent/piModelDriver.ts` exposes the full registry to a Pi `AgentSession` via `registry.toPiTools()`, so an LLM selects tools itself. Requires `@earendil-works/pi-coding-agent` + an API key (e.g. `ANTHROPIC_API_KEY`); otherwise it raises a clear typed error. The deterministic orchestrator remains the supported offline path.
+`src/agent/piModelDriver.ts` exposes the full registry to a Pi `AgentSession` via `registry.toPiTools()`, so an LLM selects tools itself — the LLM **orchestrates**, but link scoring stays deterministic. It talks to any Anthropic-compatible gateway; the base URL/key/model ride on a programmatically-registered `Model` (the SDK ignores `ANTHROPIC_BASE_URL` on this path, so Constellation plumbs it explicitly):
+
+```bash
+# .env
+ANTHROPIC_BASE_URL=https://your-gateway.example/anthropic
+ANTHROPIC_API_KEY=...
+CONSTELLATION_MODEL=glm-5.1
+```
+
+Without a gateway it raises a clear typed error; the deterministic orchestrator remains the supported offline path.
 
 ### Slack interface (optional, pi-mom)
 
@@ -160,14 +180,25 @@ The reply-building logic (`handlers.ts`) is pure and unit-tested; `piMomBot.ts` 
 
 ---
 
-## Connectors (mcporter / Composio)
+## Connectors (mcporter / Composio) — live
 
-`SourceConnector` (`src/connectors/types.ts`) is the only thing that talks to a source. The scaffold ships **fixture-backed mocks**; real connectors implement the same interface:
+`SourceConnector` (`src/connectors/types.ts`) is the only thing that talks to a source. Mocks are the default; the **live** connectors implement the same interface:
 
-- `src/connectors/mcporter/` — the bridge to MCP/Composio tool servers (lazy import of `mcporter`, env-config via `MCPORTER_*`, no hardcoded creds, wiring left as TODOs).
-- `src/connectors/composio/` — `ComposioConnector` talks to Composio **through** mcporter (the five sources: Slack, Email/Gmail, Calendar, Meeting/Drive, Docs/Drive). Swapping mocks for real connectors requires no upstream change.
+- `src/connectors/mcporter/` — a real bridge: lazily imports `mcporter`, builds a `Runtime` over the remote MCP endpoint with the auth header, parses `CallResult`s. Vendor-neutral (urls + headers only).
+- `src/connectors/composio/` — `ComposioConnector` talks to Composio's hosted **meta-tool router** (`https://connect.composio.dev/mcp`) through mcporter. There are no direct app tools: every read executes a tool slug (`GMAIL_FETCH_EMAILS`, `SLACK_FETCH_CONVERSATION_HISTORY`, `GOOGLECALENDAR_EVENTS_LIST`) via `COMPOSIO_MULTI_EXECUTE_TOOL` and unwraps the two-layer envelope.
 
-Set `CONSTELLATION_CONNECTOR_MODE=composio` (+ `COMPOSIO_API_KEY`) to opt in; without a key it stays on mocks.
+Fetch windows: **Gmail** pulls everything since the newest stored email (epoch-second cursor); **Slack** sweeps all readable channels (`SLACK_LIST_CONVERSATIONS`) for the last 24h in one batched router call; **Calendar** reads a rolling 30d-back/45d-forward window — combined with ingest dedupe, each run picks up only new items.
+
+```bash
+# .env
+CONSTELLATION_CONNECTOR_MODE=composio
+COMPOSIO_API_KEY=ck__...                              # x-consumer-api-key header
+COMPOSIO_ENDPOINT=https://connect.composio.dev/mcp
+COMPOSIO_CALENDAR_ID=primary                          # or a specific calendar
+COMPOSIO_SLACK_CHANNEL=                               # optional fallback channel
+```
+
+Without a key it stays on mocks; `doc`/`meeting_transcript` remain mock-backed. Per-source failures degrade gracefully (e.g. no Slack channel ⇒ Slack skipped, the rest still ingest).
 
 ---
 
@@ -196,8 +227,8 @@ npm run eval -- false_friend_topic
 npm test
 ```
 
-- **Unit**: artifact schemas, tool registry (+ `toPiTools` seam + scoped registry), confidence policy, LinkLab scoped isolation, graph store, resilience (backoff/retry/rate-limit).
-- **Integration**: ingest fixtures, connect Slack→email/calendar/doc, generate Context Card, false-friend quarantine, RPC command flow, Slack handler.
+- **Unit**: artifact schemas, tool registry (+ `toPiTools` seam + scoped registry), confidence policy, LinkLab scoped isolation, graph store, resilience (backoff/retry/rate-limit), the zod→JSON-Schema bridge, brief analytics + parse-fallback (no LLM in tests).
+- **Integration**: ingest fixtures, connect Slack→email/calendar/doc, `connect-all` dedupe invariants, re-ingest idempotency (no clobber across processes), generate Context Card, false-friend quarantine, RPC command flow, Slack handler.
 
 ---
 
