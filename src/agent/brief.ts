@@ -523,15 +523,30 @@ export interface GraphDump {
     lastActivityAt: string;
     confidence: number;
   }>;
+  /** Links beyond the prompt budget that were left out (0 = full coverage).
+   * Stated explicitly so the model never assumes it saw every edge. */
+  linksOmitted: number;
 }
 
 const EXCERPT_LIMIT = 200;
+const RATIONALE_LIMIT = 140;
+
+/**
+ * Hard cap on inlined links. A dense graph (hundreds of signals) can carry
+ * thousands of edges whose rationales alone exceed the model's context window
+ * — observed live: 2.6k links produced a ~250k-token prompt and an empty
+ * model reply. Links are prioritized by status (confirmed first) then
+ * confidence, and the omitted count is surfaced in the dump.
+ */
+const LINK_LIMIT = 300;
+
+const STATUS_RANK: Record<string, number> = { confirmed: 0, proposed: 1, quarantined: 2, rejected: 3 };
 
 function truncate(text: string, limit = EXCERPT_LIMIT): string {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-/** Compact, complete dump of the graph for prompt inlining. Pure read. */
+/** Compact dump of the graph for prompt inlining, bounded for context. Pure read. */
 export function buildGraphDump(store: GraphStore): GraphDump {
   const signals = [...store.listSignals()]
     .sort((a, b) => (epochOf(a.timestamp) ?? 0) - (epochOf(b.timestamp) ?? 0) || a.id.localeCompare(b.id))
@@ -548,18 +563,23 @@ export function buildGraphDump(store: GraphStore): GraphDump {
       ...(s.extracted.decisions.length > 0 ? { decisions: s.extracted.decisions } : {}),
     }));
 
-  const links = [...store.listLinks()]
-    .sort((a, b) => a.id.localeCompare(b.id))
-    .map((l) => ({
-      id: l.id,
-      pair: `${l.sourceSignalId} -> ${l.targetSignalId}`,
-      relation: l.relation,
-      status: l.status,
-      confidence: l.confidence,
-      rationale: l.evidence.rationale,
-      ...(l.evidence.sharedPeople.length > 0 ? { sharedPeople: l.evidence.sharedPeople } : {}),
-      ...((l.evidence.artifactOverlap?.length ?? 0) > 0 ? { artifacts: l.evidence.artifactOverlap } : {}),
-    }));
+  const allLinks = [...store.listLinks()].sort(
+    (a, b) =>
+      (STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9) ||
+      b.confidence - a.confidence ||
+      a.id.localeCompare(b.id),
+  );
+  const linksOmitted = Math.max(0, allLinks.length - LINK_LIMIT);
+  const links = allLinks.slice(0, LINK_LIMIT).map((l) => ({
+    id: l.id,
+    pair: `${l.sourceSignalId} -> ${l.targetSignalId}`,
+    relation: l.relation,
+    status: l.status,
+    confidence: l.confidence,
+    rationale: truncate(l.evidence.rationale, RATIONALE_LIMIT),
+    ...(l.evidence.sharedPeople.length > 0 ? { sharedPeople: l.evidence.sharedPeople } : {}),
+    ...((l.evidence.artifactOverlap?.length ?? 0) > 0 ? { artifacts: l.evidence.artifactOverlap } : {}),
+  }));
 
   const constellations = [...store.listConstellations()]
     .sort((a, b) => a.id.localeCompare(b.id))
@@ -575,7 +595,7 @@ export function buildGraphDump(store: GraphStore): GraphDump {
       confidence: c.confidence,
     }));
 
-  return { signals, links, constellations };
+  return { signals, links, constellations, linksOmitted };
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +674,7 @@ Reading guide for the analytics:
 - hygiene: fixture/noise contamination and unresolved raw actor ids. These weaken the memory itself.
 
 ==== FULL GRAPH ====
+All signals are inlined. Links are inlined up to a prompt budget, highest-evidence first (confirmed before proposed before quarantined, then by confidence); \`linksOmitted\` says how many lower-evidence links were left out — treat link coverage as partial when it is > 0.
 ${FENCE}json
 ${JSON.stringify(dump, null, 2)}
 ${FENCE}

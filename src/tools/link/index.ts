@@ -31,11 +31,37 @@ const ScoresSchema = z.object({
   artifact: z.number(),
 });
 
+/** Candidate-blocking temporal window: pairs this close in time are always
+ * worth scoring even with no shared facts (e.g. a thread and the meeting it
+ * spawned). */
+const BLOCKING_WINDOW_MS = 48 * 3_600_000;
+
+/** A person/fact is "discriminative" only if it appears in at most this many
+ * signals — scale-aware so the graph owner (who touches nearly everything)
+ * stops being false evidence of relatedness, while tiny fixture graphs are
+ * unaffected. */
+function discriminativeCeiling(graphSize: number): number {
+  return Math.max(5, Math.ceil(graphSize * 0.3));
+}
+
+function blockingFeatures(s: {
+  actorIds: string[];
+  extracted: { people: string[]; entities: string[]; projects: string[]; artifacts: string[] };
+}): string[] {
+  return [
+    ...s.actorIds,
+    ...s.extracted.people,
+    ...s.extracted.entities,
+    ...s.extracted.projects,
+    ...s.extracted.artifacts,
+  ].map((f) => f.toLowerCase());
+}
+
 export const linkTools: ToolDefinition<any, any>[] = [
   defineTool({
     name: "link.find_candidate_links",
     description:
-      "Find candidate signals that might connect to an anchor signal. Returns ids for the LinkLab to score; high recall, no judgement.",
+      "Find candidate signals that might connect to an anchor signal. High recall with cheap blocking: keeps candidates that share a discriminative person/entity/project/artifact with the anchor or sit within a 48h window — pairs that share nothing and are far apart in time can never confirm (the corroboration policy refuses them), so scoring them is pure waste.",
     inputSchema: z.object({
       anchorSignalId: z.string(),
       candidateSignalIds: z.array(z.string()).optional(),
@@ -50,13 +76,43 @@ export const linkTools: ToolDefinition<any, any>[] = [
     riskLevel: "low",
     requiredConsentScopes: [],
     handler: async ({ anchorSignalId, candidateSignalIds }, ctx) => {
-      const all = candidateSignalIds
-        ? candidateSignalIds
-        : ctx.store.listSignals().map((s) => s.id);
-      return {
-        anchorSignalId,
-        candidateSignalIds: all.filter((id) => id !== anchorSignalId),
-      };
+      // An explicit candidate list is respected verbatim (caller's judgement).
+      if (candidateSignalIds) {
+        return {
+          anchorSignalId,
+          candidateSignalIds: candidateSignalIds.filter((id) => id !== anchorSignalId),
+        };
+      }
+      const all = ctx.store.listSignals();
+      const anchor = ctx.store.getSignal(anchorSignalId);
+      if (!anchor) return { anchorSignalId, candidateSignalIds: [] };
+
+      // Document frequency per feature, so ubiquitous features (the graph
+      // owner's email on every message, a generic entity) don't match
+      // everything to everything.
+      const df = new Map<string, number>();
+      for (const s of all) {
+        for (const f of new Set(blockingFeatures(s))) df.set(f, (df.get(f) ?? 0) + 1);
+      }
+      const ceiling = discriminativeCeiling(all.length);
+      const anchorFeatures = new Set(
+        blockingFeatures(anchor).filter((f) => (df.get(f) ?? 0) <= ceiling),
+      );
+      const anchorT = Date.parse(anchor.timestamp);
+
+      const kept = all.filter((s) => {
+        if (s.id === anchorSignalId) return false;
+        const t = Date.parse(s.timestamp);
+        if (
+          Number.isFinite(anchorT) &&
+          Number.isFinite(t) &&
+          Math.abs(t - anchorT) <= BLOCKING_WINDOW_MS
+        ) {
+          return true;
+        }
+        return blockingFeatures(s).some((f) => anchorFeatures.has(f));
+      });
+      return { anchorSignalId, candidateSignalIds: kept.map((s) => s.id) };
     },
   }),
 

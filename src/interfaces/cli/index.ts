@@ -8,6 +8,7 @@ import { runEvalCase, runAllEvals, getEvalCase, listEvalCaseNames } from "../../
 import { runModelDriven } from "../../agent/piModelDriver.js";
 import { generateBrief } from "../../agent/brief.js";
 import { IdGenerator } from "../../util/ids.js";
+import { RateLimiterRegistry } from "../../resilience/rateLimit.js";
 import { createLogger, setLogger } from "../../observability/logger.js";
 
 /**
@@ -43,7 +44,17 @@ function buildRuntime(): { runtime: ReturnType<typeof createConstellationRuntime
     ...store.listLinks().map((l) => l.id),
     ...store.listConstellations().map((c) => c.id),
   ]);
-  const runtime = createConstellationRuntime({ store, connectors: createConnectors(), ids });
+  // The "embedding" scorer is a LOCAL function in this build, so the default
+  // 10/s external-API budget would make connect-all on a few hundred signals
+  // sleep for an hour. Keep the limiter mechanism, raise the budget; restore
+  // an API-shaped rate when a real embedding provider is wired in.
+  const rateLimiters = new RateLimiterRegistry({ ratePerSec: 500, burst: 500 });
+  const runtime = createConstellationRuntime({
+    store,
+    connectors: createConnectors(),
+    ids,
+    rateLimiters,
+  });
   return { runtime, store };
 }
 

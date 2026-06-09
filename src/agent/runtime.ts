@@ -179,7 +179,7 @@ export class ConstellationRuntime {
 
     const fetchPlan = {
       goal: "fetch",
-      steps: sources.map((s) => buildFetchStep(s, s === "email" ? this.sinceCursor(s) : {})),
+      steps: sources.map((s) => buildFetchStep(s, this.fetchQuery(s))),
     };
     await executePlan(fetchPlan, this.registry, ctx, context);
 
@@ -207,6 +207,28 @@ export class ConstellationRuntime {
 
     trace.complete({ signalCount: signalIds.length, skipped });
     return { signalIds, signalCount: signalIds.length, skipped, snapshot: context.snapshot() };
+  }
+
+  /** First-run Slack backfill depth. Slack's default window is only 24h, so a
+   * graph with no slack history yet gets one deeper sweep. */
+  private static readonly SLACK_BACKFILL_DAYS = 7;
+
+  /** Per-source fetch query for an ingest run. */
+  private fetchQuery(source: SignalSource): { since?: string } {
+    if (source === "email") return this.sinceCursor(source);
+    if (source === "slack") {
+      // Only against a real connector (mock fixtures carry old timestamps and
+      // would be filtered out by any recency window).
+      const live = this.connectors.has(source) && this.connectors.get(source).kind !== "mock";
+      const hasHistory = this.store.listSignals().some((s) => s.source === "slack");
+      if (live && !hasHistory) {
+        const since = new Date(
+          Date.now() - ConstellationRuntime.SLACK_BACKFILL_DAYS * 86_400_000,
+        ).toISOString();
+        return { since };
+      }
+    }
+    return {};
   }
 
   /** Since-cursor for a source: newest stored signal timestamp minus 1h. */

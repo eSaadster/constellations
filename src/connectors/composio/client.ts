@@ -164,6 +164,44 @@ export class ComposioConnector implements SourceConnector {
     return response;
   }
 
+  /**
+   * Page size that reliably stays INLINE in the meta-router response. Larger
+   * payloads get silently truncated to a ~3-item `data_preview` (observed
+   * live), so big windows must paginate at this size rather than ask for one
+   * big page.
+   */
+  private static readonly PAGE_SIZE = 10;
+
+  /** Pull the continuation token out of an app payload (gmail/calendar use
+   * nextPageToken; slack uses response_metadata.next_cursor). */
+  private nextToken(payload: unknown): string | undefined {
+    if (!isObject(payload)) return undefined;
+    const direct = asString(payload.nextPageToken);
+    if (direct) return direct;
+    const meta = payload.response_metadata;
+    return isObject(meta) ? asString(meta.next_cursor) : undefined;
+  }
+
+  /** Paginate a list slug until `want` items, the token runs dry, or pageCap. */
+  private async pagedExec(
+    toolSlug: string,
+    baseArgs: JsonObject,
+    opts: { tokenArg: string; want: number; pageCap?: number },
+  ): Promise<JsonObject[]> {
+    const items: JsonObject[] = [];
+    const cap = opts.pageCap ?? 12;
+    let token: string | undefined;
+    for (let page = 0; page < cap && items.length < opts.want; page++) {
+      const args: JsonObject = token ? { ...baseArgs, [opts.tokenArg]: token } : { ...baseArgs };
+      const payload = await this.exec(toolSlug, args);
+      const rows = this.container(payload);
+      items.push(...rows);
+      token = this.nextToken(payload);
+      if (!token || rows.length === 0) break;
+    }
+    return items.slice(0, opts.want);
+  }
+
   /** Pull the list container array out of a per-source app payload. */
   private container(payload: unknown): JsonObject[] {
     if (!isObject(payload)) return [];
@@ -186,8 +224,11 @@ export class ComposioConnector implements SourceConnector {
     const slugs = this.slugs();
     switch (this.source) {
       case "email": {
-        const payload = await this.exec(slugs.list, this.gmailArgs(query));
-        return this.container(payload).map((m) => this.mapGmail(m));
+        const rows = await this.pagedExec(slugs.list, this.gmailArgs(query), {
+          tokenArg: "page_token",
+          want: query.limit ?? 100,
+        });
+        return rows.map((m) => this.mapGmail(m));
       }
       case "slack": {
         const channels = await this.resolveSlackChannels(query);
@@ -199,32 +240,50 @@ export class ComposioConnector implements SourceConnector {
         const since =
           query.since ?? new Date(Date.now() - 24 * 3_600_000).toISOString();
         const windowed = { ...query, since };
-        // One batched meta-router call covers every channel; per-channel
-        // failures (not_in_channel, archived) are skipped, which effectively
-        // restricts the sweep to channels this account can read.
-        const perChannel = Math.min(query.limit ?? 50, 200);
+        // One batched meta-router call covers every channel's FIRST page;
+        // per-channel failures (not_in_channel, archived) are skipped, which
+        // effectively restricts the sweep to channels this account can read.
+        // Pages are kept small (PAGE_SIZE) so responses stay inline rather
+        // than truncating to a preview; busy channels paginate via cursor.
         const results = await this.execMany(
           channels.map((channel) => ({
             tool_slug: slugs.list,
-            arguments: this.slackArgs(windowed, channel, perChannel),
+            arguments: this.slackArgs(windowed, channel, ComposioConnector.PAGE_SIZE),
           })),
         );
         const items: RawSourceItem[] = [];
-        results.forEach((result, i) => {
-          if (!result.ok) return;
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i]!;
+          if (!result.ok) continue;
           const channel = channels[i]!;
-          for (const m of this.container(result.data)) {
-            if (m.subtype === "channel_join") continue;
-            items.push(this.mapSlack(m, channel));
+          const push = (rows: JsonObject[]) => {
+            for (const m of rows) {
+              if (m.subtype === "channel_join") continue;
+              items.push(this.mapSlack(m, channel));
+            }
+          };
+          push(this.container(result.data));
+          // Follow the cursor for busy channels (bounded).
+          let token = this.nextToken(result.data);
+          for (let extra = 0; token && extra < 3; extra++) {
+            const payload = await this.exec(slugs.list, {
+              ...this.slackArgs(windowed, channel, ComposioConnector.PAGE_SIZE),
+              cursor: token,
+            });
+            push(this.container(payload));
+            token = this.nextToken(payload);
           }
-        });
+        }
         items.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
         return query.limit ? items.slice(0, query.limit) : items;
       }
       case "calendar": {
         const calendarId = query.containerId ?? this.config.calendarId ?? DEFAULT_CALENDAR_ID;
-        const payload = await this.exec(slugs.list, this.calendarArgs(query, calendarId));
-        return this.container(payload).map((e) => this.mapCalendar(e, calendarId));
+        const rows = await this.pagedExec(slugs.list, this.calendarArgs(query, calendarId), {
+          tokenArg: "pageToken",
+          want: query.limit ?? 100,
+        });
+        return rows.map((e) => this.mapCalendar(e, calendarId));
       }
       default:
         throw new SourceUnavailableError(`Composio list unsupported for ${this.source}`, {
@@ -293,13 +352,18 @@ export class ComposioConnector implements SourceConnector {
   // Per-source argument builders
   // ---------------------------------------------------------------------------
 
-  /** Gmail uses snake_case args; folds query + since/until into search syntax. */
+  /**
+   * Gmail uses snake_case args; folds query + since/until into search syntax.
+   * `verbose: false` keeps each message compact enough that a full PAGE_SIZE
+   * page survives inline (it still carries messageText/preview/sender/subject/
+   * messageTimestamp — everything the mapper reads).
+   */
   private gmailArgs(query: ConnectorQuery): JsonObject {
     const parts: string[] = [];
     if (query.query) parts.push(query.query);
     if (query.since) parts.push(`after:${this.gmailTime(query.since)}`);
     if (query.until) parts.push(`before:${this.gmailTime(query.until)}`);
-    const args: JsonObject = { max_results: query.limit ?? 100 };
+    const args: JsonObject = { max_results: ComposioConnector.PAGE_SIZE, verbose: false };
     if (parts.length > 0) args.query = parts.join(" ");
     return args;
   }
@@ -337,7 +401,8 @@ export class ComposioConnector implements SourceConnector {
       calendarId,
       timeMin: query.since ?? new Date(Date.now() - 30 * 86400_000).toISOString(),
       timeMax: query.until ?? new Date(Date.now() + 45 * 86400_000).toISOString(),
-      maxResults: query.limit ?? 100,
+      // Per-page size; the window total is collected via pageToken pagination.
+      maxResults: ComposioConnector.PAGE_SIZE,
       singleEvents: true,
       orderBy: "startTime",
     };
