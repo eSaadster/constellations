@@ -1,5 +1,11 @@
 import type { SignalSource } from "../../artifacts/Signal.js";
 import {
+  cleanSlackText,
+  resolveActorIds,
+  slackMentionIds,
+  type SlackUserMap,
+} from "../../extraction/heuristics.js";
+import {
   SignalParseError,
   SourceAuthError,
   SourceUnavailableError,
@@ -236,6 +242,9 @@ export class ComposioConnector implements SourceConnector {
         // gracefully rather than throw, so a composio ingest of the other
         // sources still succeeds.
         if (channels.length === 0) return [];
+        // Resolve workspace members up front so every mapped message carries
+        // human identities ("Name <email>") instead of opaque U… ids.
+        const users = await this.slackUserMap();
         // Window: everything since `query.since`, defaulting to the last 24h.
         const since =
           query.since ?? new Date(Date.now() - 24 * 3_600_000).toISOString();
@@ -259,7 +268,7 @@ export class ComposioConnector implements SourceConnector {
           const push = (rows: JsonObject[]) => {
             for (const m of rows) {
               if (m.subtype === "channel_join") continue;
-              items.push(this.mapSlack(m, channel));
+              items.push(this.mapSlack(m, channel, users));
             }
           };
           push(this.container(result.data));
@@ -449,6 +458,55 @@ export class ComposioConnector implements SourceConnector {
     return this.config.slackChannel ? [this.config.slackChannel] : [];
   }
 
+  /** Cached workspace member map; an empty map records a failed/absent fetch. */
+  private slackUsers?: Map<string, string>;
+
+  /**
+   * Resolve Slack workspace members to a `U… id -> "Real Name <email>"` map
+   * (no email -> name only). normalizePersonKey collapses the bracketed form
+   * to the bare email, which is the SAME key the person has on their email and
+   * calendar signals — this map is what makes cross-source people overlap
+   * possible. Cached per connector instance; failures degrade to an empty map
+   * (ingest proceeds with raw ids, exactly today's behavior).
+   */
+  async slackUserMap(): Promise<SlackUserMap> {
+    if (this.slackUsers) return this.slackUsers;
+    const map = new Map<string, string>();
+    const slug = SOURCE_SLUGS.slack?.listUsers;
+    if (slug) {
+      try {
+        let cursor: string | undefined;
+        // ~p*PAGE_SIZE members; pages stay small to keep responses inline
+        // (the meta-router truncates big payloads to a preview).
+        for (let page = 0; page < 20; page++) {
+          const args: JsonObject = { limit: 20 };
+          if (cursor) args.cursor = cursor;
+          const payload = await this.exec(slug, args);
+          const members = isObject(payload) && Array.isArray(payload.members) ? payload.members : [];
+          for (const m of members) {
+            if (!isObject(m)) continue;
+            const id = asString(m.id);
+            if (!id || m.is_bot === true || m.deleted === true || id === "USLACKBOT") continue;
+            const profile = isObject(m.profile) ? m.profile : undefined;
+            const name =
+              asString(m.real_name) ??
+              (profile ? asString(profile.display_name) : undefined) ??
+              asString(m.name);
+            if (!name) continue;
+            const email = profile ? asString(profile.email) : undefined;
+            map.set(id, email ? `${name} <${email}>` : name);
+          }
+          cursor = this.nextToken(payload);
+          if (!cursor || members.length === 0) break;
+        }
+      } catch {
+        // Unreachable/unauthorized users.list -> raw ids remain.
+      }
+    }
+    this.slackUsers = map;
+    return map;
+  }
+
   // ---------------------------------------------------------------------------
   // Per-source field mapping -> RawSourceItem
   // ---------------------------------------------------------------------------
@@ -475,20 +533,28 @@ export class ComposioConnector implements SourceConnector {
     };
   }
 
-  private mapSlack(m: JsonObject, channel: string): RawSourceItem {
+  private mapSlack(m: JsonObject, channel: string, users?: SlackUserMap): RawSourceItem {
     const ts = asString(m.ts) ?? "";
     const externalId = `${channel}:${ts}`;
     const ms = ts ? parseFloat(ts) * 1000 : NaN;
     const timestamp = Number.isNaN(ms) ? new Date().toISOString() : new Date(ms).toISOString();
     const user = asString(m.user);
+    const rawText = asString(m.text) ?? "";
+    // Resolve identities at the boundary: actors become "Name <email>",
+    // <@U…> mentions land in extractedHints.people, and the stored text is
+    // de-markup'd (readable excerpts, clean URLs for artifact extraction).
+    const mentioned = slackMentionIds(rawText)
+      .map((id) => users?.get(id))
+      .filter((p): p is string => Boolean(p));
     return {
       source: this.source,
       externalId,
-      actorIds: user ? [user] : [],
+      actorIds: resolveActorIds(user ? [user] : [], users),
       timestamp,
       title: undefined,
-      text: asString(m.text) ?? "",
+      text: cleanSlackText(rawText, users),
       raw: { ...m, containerId: channel },
+      ...(mentioned.length > 0 ? { extractedHints: { people: mentioned } } : {}),
     };
   }
 
@@ -501,7 +567,22 @@ export class ComposioConnector implements SourceConnector {
       new Date().toISOString();
     const organizer = asString(dotGet(e, "organizer.email"));
     const creator = asString(dotGet(e, "creator.email"));
-    const actorIds = [organizer, creator].filter(
+    // Attendees are the people dimension's richest cross-source evidence — the
+    // same emails appear as senders/recipients on email signals. Rooms and
+    // other resource entries are scheduling furniture, not people.
+    const attendees = Array.isArray(e.attendees) ? e.attendees : [];
+    const attendeeIds = attendees
+      .filter(isObject)
+      .filter((a) => a.resource !== true)
+      .map((a) => {
+        const email = asString(a.email);
+        if (!email || email.endsWith("@resource.calendar.google.com")) return undefined;
+        const name = asString(a.displayName);
+        return name ? `${name} <${email}>` : email;
+      })
+      .filter((s): s is string => Boolean(s))
+      .slice(0, 15);
+    const actorIds = [organizer, creator, ...attendeeIds].filter(
       (s, i, arr): s is string => Boolean(s) && arr.indexOf(s) === i,
     );
     const summary = asString(e.summary);

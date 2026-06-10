@@ -4,6 +4,8 @@ import { dirname, resolve } from "node:path";
 import { createConstellationRuntime } from "../../agent/runtime.js";
 import { FileGraphStore } from "../../graph/fileStore.js";
 import { createConnectors } from "../../connectors/index.js";
+import { reextractAll } from "../../extraction/backfill.js";
+import type { SlackUserMap } from "../../extraction/heuristics.js";
 import { runEvalCase, runAllEvals, getEvalCase, listEvalCaseNames } from "../../evals/index.js";
 import { runModelDriven } from "../../agent/piModelDriver.js";
 import { generateBrief } from "../../agent/brief.js";
@@ -22,6 +24,7 @@ import { createLogger, setLogger } from "../../observability/logger.js";
  *   constellation context-card <signalId>
  *   constellation eval [caseName]
  *   constellation signals            (list ingested signals + ids)
+ *   constellation reextract [--refetch]  (heuristic re-extraction over stored signals)
  *   constellation model "<task>"     (model-driven path; needs a gateway + key)
  *   constellation brief               (LLM daily brief over the graph; needs a gateway + key)
  *
@@ -68,6 +71,7 @@ Usage:
   constellation health
   constellation ingest-fixtures
   constellation signals
+  constellation reextract [--refetch]
   constellation connect <signalId>
   constellation connect-all [--dedupe]
   constellation context-card <signalId>
@@ -131,6 +135,68 @@ async function main(): Promise<void> {
           .listSignals()
           .map((s) => ({ id: s.id, source: s.source, title: s.title, timestamp: s.timestamp })),
       );
+      return;
+    }
+
+    case "reextract": {
+      // Heuristic re-extraction over stored signals (already-ingested items are
+      // never re-built by ingest, so extraction improvements need a backfill).
+      // With --refetch, calendar events are also re-fetched live to pick up
+      // attendees, which are not recoverable from stored fields.
+      const refetch = args.includes("--refetch");
+      const { runtime, store } = buildRuntime();
+      const signals = runtime.store.listSignals();
+      if (signals.length === 0) return fail("no signals to re-extract");
+
+      // Slack identity map via the live connector when configured (duck-typed:
+      // only the Composio connector has it; mock mode proceeds without).
+      const connectors = createConnectors();
+      let slackUsers: SlackUserMap | undefined;
+      const slackConn = connectors.has("slack") ? connectors.get("slack") : undefined;
+      if (slackConn && typeof (slackConn as { slackUserMap?: unknown }).slackUserMap === "function") {
+        try {
+          slackUsers = await (slackConn as unknown as {
+            slackUserMap: () => Promise<SlackUserMap>;
+          }).slackUserMap();
+        } catch {
+          // Unreachable workspace -> ids stay raw.
+        }
+      }
+
+      const { signals: updated, stats } = reextractAll(signals, slackUsers);
+
+      let attendeesAdded = 0;
+      if (refetch) {
+        const calConn = connectors.has("calendar") ? connectors.get("calendar") : undefined;
+        if (calConn && calConn.kind !== "mock") {
+          const calendarSignals = updated.filter((s) => s.source === "calendar");
+          // Modest parallelism: each fetch is one meta-router round trip.
+          const CHUNK = 10;
+          for (let i = 0; i < calendarSignals.length; i += CHUNK) {
+            const chunk = calendarSignals.slice(i, i + CHUNK);
+            const fetched = await Promise.all(
+              chunk.map((s) => calConn.fetchById(s.externalId).catch(() => undefined)),
+            );
+            for (let j = 0; j < chunk.length; j++) {
+              const item = fetched[j];
+              const sig = chunk[j]!;
+              if (!item) continue;
+              const merged = [...new Set([...sig.actorIds, ...item.actorIds])];
+              if (merged.length > sig.actorIds.length) {
+                attendeesAdded += merged.length - sig.actorIds.length;
+                sig.actorIds = merged;
+              }
+            }
+            console.error(
+              `refetch calendar: ${Math.min(i + CHUNK, calendarSignals.length)}/${calendarSignals.length}`,
+            );
+          }
+        }
+      }
+
+      for (const s of updated) runtime.store.addSignal(s);
+      store.save();
+      print({ ...stats, slackUsersResolved: slackUsers?.size ?? 0, attendeesAdded, refetch });
       return;
     }
 

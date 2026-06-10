@@ -3,33 +3,29 @@ import { defineTool } from "../defineTool.js";
 import type { ToolDefinition } from "../../agent/toolRegistry.js";
 import { SignalSchema, type Signal } from "../../artifacts/Signal.js";
 import { RawSourceItemSchema } from "../../connectors/schema.js";
+import { extractFacts, type ExtractInput } from "../../extraction/heuristics.js";
 import { sourceHash } from "../../graph/provenance.js";
 
 /**
  * signal.* — normalization + extraction + persistence.
  *
- * Extraction tools are deterministic mocks: they MERGE fixture `extractedHints`
- * (carried on the threaded `raw` item) with values derived from text (URLs,
- * @mentions). In production these would be NLP/LLM extractors. The Signal and
- * its raw item are threaded together so the tools compose into a chain through
- * the orchestrator's call ledger.
+ * Extraction tools are deterministic HEURISTICS (regex + casing rules in
+ * `extraction/heuristics.ts`), MERGED with any `extractedHints` carried on the
+ * threaded raw item (fixtures supply topical hints; the Composio Slack
+ * connector supplies resolved mention identities). The Signal and its raw item
+ * are threaded together so the tools compose into a chain through the
+ * orchestrator's call ledger.
  */
 
 const SignalWithRaw = z.object({ signal: SignalSchema, raw: RawSourceItemSchema });
-
-const URL_RE = /\bhttps?:\/\/[^\s)]+/gi;
-const MENTION_RE = /@([a-z0-9._-]+)/gi;
 
 function uniq(items: string[]): string[] {
   return [...new Set(items.map((s) => s.trim()).filter(Boolean))];
 }
 
-function deriveArtifacts(text: string): string[] {
-  return uniq([...text.matchAll(URL_RE)].map((m) => m[0]));
-}
-
-function derivePeople(text: string): string[] {
-  return uniq([...text.matchAll(MENTION_RE)].map((m) => m[1]!));
+/** Heuristic facts for the threaded raw item (full text, not the excerpt). */
+function factsOf(raw: { source: ExtractInput["source"]; title?: string; text: string }) {
+  return extractFacts({ source: raw.source, title: raw.title, text: raw.text });
 }
 
 export const signalTools: ToolDefinition<any, any>[] = [
@@ -85,13 +81,18 @@ export const signalTools: ToolDefinition<any, any>[] = [
     requiredConsentScopes: [],
     handler: async ({ signal, raw }) => {
       const hints = raw.extractedHints;
+      const derived = factsOf(raw);
       return {
         raw,
         signal: {
           ...signal,
           extracted: {
             ...signal.extracted,
-            entities: uniq([...signal.extracted.entities, ...(hints?.entities ?? [])]),
+            entities: uniq([
+              ...signal.extracted.entities,
+              ...(hints?.entities ?? []),
+              ...derived.entities,
+            ]),
             projects: uniq([...signal.extracted.projects, ...(hints?.projects ?? [])]),
           },
         },
@@ -110,7 +111,7 @@ export const signalTools: ToolDefinition<any, any>[] = [
     riskLevel: "low",
     requiredConsentScopes: [],
     handler: async ({ signal, raw }) => {
-      const derived = derivePeople(`${signal.title ?? ""} ${signal.excerpt}`);
+      const derived = factsOf(raw).people;
       return {
         raw,
         signal: {
@@ -161,7 +162,7 @@ export const signalTools: ToolDefinition<any, any>[] = [
     riskLevel: "low",
     requiredConsentScopes: [],
     handler: async ({ signal, raw }) => {
-      const derived = deriveArtifacts(`${signal.title ?? ""} ${signal.excerpt}`);
+      const derived = factsOf(raw).artifacts;
       return {
         raw,
         signal: {
@@ -189,21 +190,33 @@ export const signalTools: ToolDefinition<any, any>[] = [
     sideEffects: "none",
     riskLevel: "low",
     requiredConsentScopes: [],
-    handler: async ({ signal, raw }) => ({
-      raw,
-      signal: {
-        ...signal,
-        extracted: {
-          ...signal.extracted,
-          dates: uniq([...signal.extracted.dates, ...(raw.extractedHints?.dates ?? [])]),
-          asks: uniq([...signal.extracted.asks, ...(raw.extractedHints?.asks ?? [])]),
-          decisions: uniq([
-            ...signal.extracted.decisions,
-            ...(raw.extractedHints?.decisions ?? []),
-          ]),
+    handler: async ({ signal, raw }) => {
+      const derived = factsOf(raw);
+      return {
+        raw,
+        signal: {
+          ...signal,
+          extracted: {
+            ...signal.extracted,
+            dates: uniq([
+              ...signal.extracted.dates,
+              ...(raw.extractedHints?.dates ?? []),
+              ...derived.dates,
+            ]),
+            asks: uniq([
+              ...signal.extracted.asks,
+              ...(raw.extractedHints?.asks ?? []),
+              ...derived.asks,
+            ]),
+            decisions: uniq([
+              ...signal.extracted.decisions,
+              ...(raw.extractedHints?.decisions ?? []),
+              ...derived.decisions,
+            ]),
+          },
         },
-      },
-    }),
+      };
+    },
   }),
 
   defineTool({

@@ -61,6 +61,9 @@ export interface SourceSlugs {
   /** Slack-only: enumerate workspace conversations (confirmed live: returns
    * data.channels[] with id + name). */
   listConversations?: string;
+  /** Slack-only: enumerate workspace members (confirmed live: returns
+   * data.members[] with id, real_name, profile.email; cursor-paginated). */
+  listUsers?: string;
 }
 
 export const SOURCE_SLUGS: Partial<Record<SignalSource, SourceSlugs>> = {
@@ -73,6 +76,7 @@ export const SOURCE_SLUGS: Partial<Record<SignalSource, SourceSlugs>> = {
     fetchById: "",
     findChannels: "SLACK_FIND_CHANNELS",
     listConversations: "SLACK_LIST_CONVERSATIONS",
+    listUsers: "SLACK_LIST_ALL_USERS",
   },
   calendar: {
     list: "GOOGLECALENDAR_EVENTS_LIST",
